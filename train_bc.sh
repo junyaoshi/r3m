@@ -1,4 +1,4 @@
-export MODEL_TYPE="r3m_bc"
+export MODEL_TYPE="resnet8"
 export TIME_INTERVAL=10
 export LR=0.0004
 export EVAL_FREQ=2
