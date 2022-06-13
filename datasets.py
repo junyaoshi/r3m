@@ -119,9 +119,13 @@ class SomethingSomethingR3M(Dataset):
 if __name__ == '__main__':
     debug = False
     task_names = ['push_left_right']
-    train_data = SomethingSomethingR3M(task_names, data_home_dir=DATA_HOME_DIR, train=True, debug=debug)
+    train_data = SomethingSomethingR3M(
+        task_names, data_home_dir=DATA_HOME_DIR, train=True, debug=debug, run_on_cv_server=True
+    )
     print(f'Number of train data: {len(train_data)}')
-    valid_data = SomethingSomethingR3M(task_names, data_home_dir=DATA_HOME_DIR, train=False, debug=debug)
+    valid_data = SomethingSomethingR3M(
+        task_names, data_home_dir=DATA_HOME_DIR, train=False, debug=debug, run_on_cv_server=True
+    )
     print(f'Number of valid data: {len(valid_data)}')
 
     print('Creating data loaders...')

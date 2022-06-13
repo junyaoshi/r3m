@@ -12,6 +12,8 @@ from torch.utils.tensorboard import SummaryWriter
 from datasets import SomethingSomethingR3M
 from bc_utils import *
 
+SANITY_CHECK_SIZE = 10
+
 def parse_args():
     """
     Parse input arguments
@@ -24,6 +26,8 @@ def parse_args():
                             'r3m_bc', # BatchNorm + 2-layer MLP
                         ],
                         help="type of network to use")
+    parser.add_argument('--time_interval', type=int, default=5,
+                        help='how many frames into the future to predict')
     parser.add_argument('--lr', type=float, default=0.001,
                         help='learning rate')
     parser.add_argument('--eval_freq', type=int, default=1,
@@ -34,8 +38,14 @@ def parse_args():
                         help='visualize rendered images after this many steps')
     parser.add_argument('--epochs', type=int, default=200,
                         help='number of training epochs')
+    parser.add_argument('--sanity_check', action='store_true', default=False,
+                        help='perform sanity check (try to only fit a few examples)')
+    parser.add_argument('--eval_on_train', action='store_true', default=False,
+                        help='Evaluate model on training set instead of validation set (for debugging)')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='batch size per GPU')
+    parser.add_argument('--vis_sample_size', type=int, default=5,
+                        help='number of samples to visualize on tensorboard')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='number of workers for dataloaders')
     parser.add_argument('--cont_training', action='store_true', default=False,
@@ -67,6 +77,10 @@ def parse_args():
 
 
 def main(args):
+    if args.sanity_check:
+        args.eval_on_train = True
+        assert args.batch_size <= SANITY_CHECK_SIZE
+        assert args.vis_sample_size <= args.batch_size
     args.save = join(args.root, args.save)
     print(f'args: \n{args}')
     if torch.cuda.is_available():
@@ -75,10 +89,21 @@ def main(args):
         device = "cpu"
     print(f'Device: {device}.')
     if args.run_on_cv_server:
-        task_names = ['push_left_right']
+        task_names = [
+            'push_left_right'
+        ]
     else:
-        task_names = ['move_away', 'move_towards', 'move_down', 'move_up',
-                      'pull_left', 'pull_right', 'push_left', 'push_right', 'push_slightly']
+        task_names = [
+            'move_away',
+            'move_towards',
+            'move_down',
+            'move_up',
+            'pull_left',
+            'pull_right',
+            'push_left',
+            'push_right',
+            'push_slightly'
+        ]
     writer = SummaryWriter(log_dir=args.save, flush_secs=60)
 
     # visualizer and frank mocap
@@ -116,12 +141,24 @@ def main(args):
 
     print('Creating data loaders...')
     train_data = SomethingSomethingR3M(
-        task_names, args.data_home_dir, train=True, debug=args.debug, run_on_cv_server=args.run_on_cv_server
+        task_names, args.data_home_dir,
+        time_interval=args.time_interval, train=True,
+        debug=args.debug, run_on_cv_server=args.run_on_cv_server
     )
+    if args.sanity_check:
+        print('Performing sanity check on a few examples.')
+        rand_indices = np.random.choice(len(train_data), SANITY_CHECK_SIZE)
+        train_data = torch.utils.data.Subset(train_data, rand_indices)
     print(f'There are {len(train_data)} train data.')
-    valid_data = SomethingSomethingR3M(
-        task_names, args.data_home_dir, train=False, debug=args.debug, run_on_cv_server=args.run_on_cv_server
-    )
+    if args.eval_on_train:
+        print('Evaluating on training set instead of validation set.')
+        valid_data = train_data
+    else:
+        valid_data = SomethingSomethingR3M(
+            task_names, args.data_home_dir,
+            time_interval=args.time_interval, train=False,
+            debug=args.debug, run_on_cv_server=args.run_on_cv_server
+        )
     print(f'There are {len(valid_data)} valid data.')
     train_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
@@ -149,15 +186,15 @@ def main(args):
 
         # Training.
         epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss, global_step = train(
-            train_queue, model, optimizer, global_step,
+            train_queue, model, optimizer, global_step, epoch,
             writer, loss_func, device, visualizer, hand_mocap, args
         )
         print(f'epoch train loss: {epoch_loss}')
         print(f'epoch train bbox loss: {epoch_bbox_loss}')
         print(f'epoch train hand pose loss: {epoch_hand_pose_loss}')
-        writer.add_scalar('train/epoch_loss', epoch_loss, global_step)
-        writer.add_scalar('train/epoch_bbox_loss', epoch_bbox_loss, global_step)
-        writer.add_scalar('train/epoch_hand_pose_loss', epoch_hand_pose_loss, global_step)
+        writer.add_scalar('train_epoch/loss', epoch_loss, global_step)
+        writer.add_scalar('train_epoch/bbox_loss', epoch_bbox_loss, global_step)
+        writer.add_scalar('train_epoch/hand_pose_loss', epoch_hand_pose_loss, global_step)
 
         # Evaluation.
         if epoch % args.eval_freq == 0 or epoch == (args.epochs - 1):
@@ -167,9 +204,9 @@ def main(args):
             print(f'epoch valid loss: {epoch_loss}')
             print(f'epoch valid bbox loss: {epoch_bbox_loss}')
             print(f'epoch valid hand pose loss: {epoch_hand_pose_loss}')
-            writer.add_scalar('valid/epoch_loss', epoch_loss, global_step)
-            writer.add_scalar('valid/epoch_bbox_loss', epoch_bbox_loss, global_step)
-            writer.add_scalar('valid/epoch_hand_pose_loss', epoch_hand_pose_loss, global_step)
+            writer.add_scalar('valid/loss', epoch_loss, global_step)
+            writer.add_scalar('valid/bbox_loss', epoch_bbox_loss, global_step)
+            writer.add_scalar('valid/hand_pose_loss', epoch_hand_pose_loss, global_step)
 
         # Save model.
         if epoch % args.save_freq == 0 or epoch == (args.epochs - 1):
@@ -186,13 +223,13 @@ def main(args):
     print(f'final epoch valid loss: {epoch_loss}')
     print(f'final epoch valid bbox loss: {epoch_bbox_loss}')
     print(f'final epoch valid hand pose loss: {epoch_hand_pose_loss}')
-    writer.add_scalar('valid/epoch_loss', epoch_loss, global_step)
-    writer.add_scalar('valid/epoch_bbox_loss', epoch_bbox_loss, global_step)
-    writer.add_scalar('valid/epoch_hand_pose_loss', epoch_hand_pose_loss, global_step)
+    writer.add_scalar('valid/loss', epoch_loss, global_step)
+    writer.add_scalar('valid/bbox_loss', epoch_bbox_loss, global_step)
+    writer.add_scalar('valid/hand_pose_loss', epoch_hand_pose_loss, global_step)
 
 
 def train(
-        train_queue, model, optimizer, global_step,
+        train_queue, model, optimizer, global_step, epoch,
         writer, loss_func, device, visualizer, hand_mocap, args
 ):
     model.train()
@@ -228,26 +265,30 @@ def train(
         epoch_bbox_loss.update(bbox_loss.data, 1)
         epoch_hand_pose_loss.update(hand_pose_loss.data, 1)
 
-        if (global_step + 1) % 100 == 0:
+        log_freq = 1 if args.sanity_check else 100
+        if (global_step + 1) % log_freq == 0:
+            writer.add_scalar('epoch', epoch, global_step)
             writer.add_scalar('train/loss', loss, global_step)
             writer.add_scalar('train/bbox_loss', bbox_loss, global_step)
             writer.add_scalar('train/hand_pose_loss', hand_pose_loss, global_step)
 
-        if (global_step + 1) % args.vis_freq == 0:
-            vis_img = generate_single_visualization(
-                current_hand_pose_path=current_hand_pose_path[0],
-                future_hand_pose_path=future_hand_pose_path[0],
-                future_cam=future_camera[0].cpu().numpy(),
-                hand=hand[0],
-                pred_hand_bbox=output[0, :future_hand_bbox.size(1)].detach().cpu().numpy(),
-                pred_hand_pose=output[0, future_hand_bbox.size(1):].detach().cpu().numpy(),
-                visualizer=visualizer,
-                hand_mocap=hand_mocap,
-                use_visualizer=args.use_visualizer,
-                device=device,
-                run_on_cv_server=args.run_on_cv_server
-            )
-            writer.add_image(f'train/vis', vis_img, global_step, dataformats='HWC')
+        vis_freq = 20 if args.sanity_check else args.vis_freq
+        if (global_step + 1) % vis_freq == 0:
+            for i in range(args.vis_sample_size):
+                vis_img = generate_single_visualization(
+                    current_hand_pose_path=current_hand_pose_path[i],
+                    future_hand_pose_path=future_hand_pose_path[i],
+                    future_cam=future_camera[i].cpu().numpy(),
+                    hand=hand[i],
+                    pred_hand_bbox=output[i, :future_hand_bbox.size(1)].detach().cpu().numpy(),
+                    pred_hand_pose=output[i, future_hand_bbox.size(1):].detach().cpu().numpy(),
+                    visualizer=visualizer,
+                    hand_mocap=hand_mocap,
+                    use_visualizer=args.use_visualizer,
+                    device=device,
+                    run_on_cv_server=args.run_on_cv_server
+                )
+                writer.add_image(f'train/vis_{i + 1}', vis_img, global_step, dataformats='HWC')
 
         global_step += 1
 
@@ -286,20 +327,21 @@ def test(valid_queue, model, global_step, writer, loss_func, device, visualizer,
         epoch_bbox_loss.update(bbox_loss.data, input.size(0))
         epoch_hand_pose_loss.update(hand_pose_loss.data, input.size(0))
 
-    vis_img = generate_single_visualization(
-        current_hand_pose_path=current_hand_pose_path[0],
-        future_hand_pose_path=future_hand_pose_path[0],
-        future_cam=future_camera[0].cpu().numpy(),
-        hand=hand[0],
-        pred_hand_bbox=output[0, :future_hand_bbox.size(1)].detach().cpu().numpy(),
-        pred_hand_pose=output[0, future_hand_bbox.size(1):].detach().cpu().numpy(),
-        visualizer=visualizer,
-        hand_mocap=hand_mocap,
-        use_visualizer=args.use_visualizer,
-        device=device,
-        run_on_cv_server=args.run_on_cv_server
-    )
-    writer.add_image(f'valid/vis', vis_img, global_step, dataformats='HWC')
+    for i in range(args.vis_sample_size):
+        vis_img = generate_single_visualization(
+            current_hand_pose_path=current_hand_pose_path[i],
+            future_hand_pose_path=future_hand_pose_path[i],
+            future_cam=future_camera[i].cpu().numpy(),
+            hand=hand[i],
+            pred_hand_bbox=output[i, :future_hand_bbox.size(1)].detach().cpu().numpy(),
+            pred_hand_pose=output[i, future_hand_bbox.size(1):].detach().cpu().numpy(),
+            visualizer=visualizer,
+            hand_mocap=hand_mocap,
+            use_visualizer=args.use_visualizer,
+            device=device,
+            run_on_cv_server=args.run_on_cv_server
+        )
+        writer.add_image(f'valid/vis_{i + 1}', vis_img, global_step, dataformats='HWC')
 
     return epoch_loss.avg, epoch_bbox_loss.avg, epoch_hand_pose_loss.avg
 
