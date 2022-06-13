@@ -11,6 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from datasets import SomethingSomethingR3M
 from bc_utils import *
+from resnet import FullyConnectedResNet8, FullyConnectedResNet16
 
 SANITY_CHECK_SIZE = 10
 
@@ -24,6 +25,8 @@ def parse_args():
     parser.add_argument("--model_type", type=str, default="r3m_bc",
                         choices=[
                             'r3m_bc', # BatchNorm + 2-layer MLP
+                            'resnet8', # Fully Connected ResNet with 8 residual layers
+                            'resnet16'  # Fully Connected ResNet with 16 residual layers
                         ],
                         help="type of network to use")
     parser.add_argument('--time_interval', type=int, default=5,
@@ -90,7 +93,10 @@ def main(args):
     print(f'Device: {device}.')
     if args.run_on_cv_server:
         task_names = [
-            'push_left_right'
+            'push_left',
+            'push_right',
+            'move_down',
+            'move_up',
         ]
     else:
         task_names = [
@@ -133,6 +139,14 @@ def main(args):
             ('relu', nn.ReLU()),
             ('fc2', nn.Linear(256, output_dim))
         ])).to(device).float()
+    elif args.model_type == 'resnet8':
+        model = FullyConnectedResNet8(
+            in_features=input_dim, out_features=output_dim
+        ).to(device).float()
+    elif args.model_type == 'resnet16':
+        model = FullyConnectedResNet16(
+            in_features=input_dim, out_features=output_dim
+        ).to(device).float()
     print(f'Loaded model {args.model_type}')
     print(f'param size = {count_parameters_in_M(model)}M')
 
