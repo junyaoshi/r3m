@@ -1,27 +1,28 @@
 #!/bin/bash
-#SBATCH --mem-per-gpu=24G
+#SBATCH --mem-per-gpu=12G
 #SBATCH --partition=dineshj-compute
 #SBATCH --qos=dineshj-high
 #SBATCH --cpus-per-gpu=4
-#SBATCH --time=24:00:00
+#SBATCH --time=36:00:00
 #SBATCH --gpus=1
-#SBATCH -w node-3090-0
-#SBATCH --job-name=res16_10
-#SBATCH -o out/resnet16_t10_w0.out
+#SBATCH -w node-2080ti-5
+#SBATCH --job-name=r3m_bc
+#SBATCH -o out/r3m_bc_t20.out
 
-export MODEL_TYPE="resnet16"
-export TIME_INTERVAL=10
+export MODEL_TYPE="r3m_bc"
+export TIME_INTERVAL=20
 export LR=0.0004
 export EVAL_FREQ=2
-export SAVE_FREQ=2
-export VIS_FREQ=2000
+export SAVE_FREQ=4
+export VIS_FREQ=3000
 export EPOCHS=300
-export BATCH_SIZE=128
+export BATCH_SIZE=64
 export VIS_SAMPLE_SIZE=5
-export NUM_WORKERS=0
+export NUM_WORKERS=4
 export DATA_HOME_DIR='/scratch/junyao/Datasets/something_something_processed'
-export DATETIME=06131130
+export DATETIME=06152345
 export SAVE="cluster_model=${MODEL_TYPE}_time=${TIME_INTERVAL}_lr=${LR}_batch=${BATCH_SIZE}_workers=${NUM_WORKERS}_date=${DATETIME}"
+# export SAVE="cluster_test"
 
 echo "MODEL_TYPE: ${MODEL_TYPE}"
 echo "TIME_INTERVAL: ${TIME_INTERVAL}"

@@ -1,14 +1,15 @@
-export MODEL_TYPE="resnet8"
+export MODEL_TYPE="resnet16"
 export TIME_INTERVAL=10
 export LR=0.0004
 export EVAL_FREQ=2
 export SAVE_FREQ=10
-export VIS_FREQ=1000
+export VIS_FREQ=2000
 export EPOCHS=300
 export BATCH_SIZE=64
-export VIS_SAMPLE_SIZE=4
-export NUM_WORKERS=8
-export SAVE="cv_model=${MODEL_TYPE}_time=${TIME_INTERVAL}_lr=${LR}_batch=${BATCH_SIZE}"
+export VIS_SAMPLE_SIZE=5
+export NUM_WORKERS=0
+# export SAVE="cv_model=${MODEL_TYPE}_time=${TIME_INTERVAL}_lr=${LR}_batch=${BATCH_SIZE}"
+export SAVE="cv_test"
 
 echo "MODEL_TYPE: ${MODEL_TYPE}"
 echo "TIME_INTERVAL: ${TIME_INTERVAL}"
@@ -34,4 +35,4 @@ CUDA_VISIBLE_DEVICES=1 xvfb-run -a python /home/junyao/LfHV/r3m/train_bc.py \
 --vis_sample_size=${VIS_SAMPLE_SIZE} \
 --num_workers=${NUM_WORKERS} \
 --save=${SAVE} \
---run_on_cv_server --use_visualizer
+--run_on_cv_server --use_visualizer --debug
