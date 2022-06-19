@@ -7,6 +7,40 @@ import torch
 import os
 import matplotlib.pyplot as plt
 
+CV_TASKS = [
+    'push_left',
+    'push_right',
+    'move_down',
+    'move_up',
+]
+CLUSTER_TASKS = [
+    'move_away',
+    'move_towards',
+    'move_down',
+    'move_up',
+    'pull_left',
+    'pull_right',
+    'push_left',
+    'push_right',
+    'push_slightly'
+]
+
+def cv_task_to_cluster_task(cv_task):
+    """Convert one-hot cv task to one-hot cluster task"""
+    task_name = CV_TASKS[torch.argmax(cv_task)]
+    cluster_task_idx = CLUSTER_TASKS.index(task_name)
+    cluster_task = torch.zeros(len(CLUSTER_TASKS))
+    cluster_task[cluster_task_idx] = 1
+    return cluster_task
+
+def cluster_task_to_cv_task(cluster_task):
+    """Convert one-hot cv task to one-hot cluster task"""
+    task_name = CLUSTER_TASKS[torch.argmax(cluster_task)]
+    cv_task_idx = CV_TASKS.index(task_name)
+    cv_task = torch.zeros(len(CV_TASKS))
+    cv_task[cv_task_idx] = 1
+    return cv_task
+
 def determine_which_hand(hand_info):
     left_hand_exists  = len(hand_info['pred_output_list'][0]['left_hand'])  > 0
     right_hand_exists = len(hand_info['pred_output_list'][0]['right_hand']) > 0
@@ -64,9 +98,10 @@ def mocap_path_to_rendered_path(mocap_path):
     return join(*path_split)
 
 def generate_single_visualization(
-        current_hand_pose_path, future_hand_pose_path, future_cam,
-        hand, pred_hand_bbox, pred_hand_pose,
-        visualizer, hand_mocap, use_visualizer, device, run_on_cv_server
+        current_hand_pose_path, future_hand_pose_path, future_cam, hand,
+        pred_hand_bbox, pred_hand_pose,
+        task_names, task,
+        visualizer, hand_mocap, use_visualizer, device, run_on_cv_server, original_task=False
 ):
     from ss_utils.filter_utils import extract_pred_mesh_list
     from renderer.image_utils import draw_hand_bbox
@@ -162,6 +197,14 @@ def generate_single_visualization(
     )
 
     vis_img_bgr = np.vstack([current_rendered_img, future_rendered_img, pred_rendered_img])
+    white = np.zeros((50, vis_img_bgr.shape[1], 3), np.uint8)
+    white[:] = (255, 255, 255)
+    vis_img_bgr = cv2.vconcat((white, vis_img_bgr))
+    font = cv2.FONT_HERSHEY_COMPLEX
+    task_name = task_names[np.argmax(task)]
+    desc_str = "Original Task" if original_task else "Task"
+    cv2.putText(vis_img_bgr, f'{desc_str}: {task_name}', (30, 40), font, 0.6, (0, 0, 0), 2, 0)
+
     vis_img = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
     return vis_img.astype(np.uint8)
 
@@ -247,6 +290,21 @@ if __name__ == '__main__':
     )
     future_camera = future_hand_info['pred_output_list'][0][hand]['pred_camera']
 
+    task_names = [
+        'move_away',
+        'move_towards',
+        'move_down',
+        'move_up',
+        'pull_left',
+        'pull_right',
+        'push_left',
+        'push_right',
+        'push_slightly',
+        'push_left_right'
+    ]
+    task = np.zeros(len(task_names))
+    task[-1] = 1
+
     print('Begin visualization.')
     vis_img = generate_single_visualization(
         current_hand_pose_path=current_hand_pose_path,
@@ -255,6 +313,8 @@ if __name__ == '__main__':
         hand=hand,
         pred_hand_bbox=future_hand_bbox,
         pred_hand_pose=future_hand_pose,
+        task_names=task_names,
+        task=task,
         visualizer=visualizer,
         hand_mocap=hand_mocap,
         use_visualizer=use_visualizer,
