@@ -15,7 +15,7 @@ from datasets import SomethingSomethingR3M
 from bc_utils import (
     count_parameters_in_M, AvgrageMeter, generate_single_visualization, CV_TASKS, CLUSTER_TASKS
 )
-from resnet import FullyConnectedResNet
+from resnet import EndtoEndNet, TransferableNet
 
 SANITY_CHECK_SIZE = 10
 
@@ -26,16 +26,20 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Training BC network.')
 
     # training
-    parser.add_argument("--model_type", type=str, default="r3m_bc",
+    parser.add_argument("--model_type", type=str, default="e2e",
                         choices=[
-                            'r3m_bc', # BatchNorm + 2-layer MLP
-                            'resnet2',  # Fully Connected ResNet with 2 residual layers
-                            'resnet4',  # Fully Connected ResNet with 4 residual layers
-                            'resnet8', # Fully Connected ResNet with 8 residual layers
-                            'resnet16',  # Fully Connected ResNet with 16 residual layers
-                            'resnet32',  # Fully Connected ResNet with 32 residual layers
+                            'e2e',  # end-to-end behavorial cloning network
+                            'transfer'  # separate representations for hand and non-hand features
                         ],
-                        help="type of network to use")
+                        help="model type to use")
+    parser.add_argument("--n_blocks", type=int, default=4,
+                        help="number of 2-layer blocks in the network")
+    parser.add_argument("--net_type", type=str, default="mlp",
+                        choices=[
+                            'mlp',  # multilayer perceptrons without residual connections
+                            'residual'  # residual network
+                        ],
+                        help="network architecture to use")
     parser.add_argument('--time_interval', type=int, default=5,
                         help='how many frames into the future to predict')
     parser.add_argument('--lr', type=float, default=0.001,
@@ -124,35 +128,23 @@ def main(args):
     input_dim = sum([r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim, cam_dim])
     output_dim = sum([hand_pose_dim, bbox_dim])
 
-    model = None
-    if args.model_type == 'r3m_bc':
-        model = nn.Sequential(OrderedDict([
-            ('batchnorm', nn.BatchNorm1d(input_dim)),
-            ('fc1', nn.Linear(input_dim, 256)),
-            ('relu', nn.ReLU()),
-            ('fc2', nn.Linear(256, output_dim))
-        ])).to(device).float()
-    elif args.model_type == 'resnet2':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=1
-        ).to(device).float()
-    elif args.model_type == 'resnet4':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=2
-        ).to(device).float()
-    elif args.model_type == 'resnet8':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=4
-        ).to(device).float()
-    elif args.model_type == 'resnet16':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=8
-        ).to(device).float()
-    elif args.model_type == 'resnet32':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=16
-        ).to(device).float()
-    print(f'Loaded model {args.model_type}')
+    model, model_init_func, residual = None, None, None
+    if args.model_type == 'e2e':
+        model_init_func = EndtoEndNet
+    elif args.model_type == 'transfer':
+        model_init_func = TransferableNet
+    if args.net_type == 'mlp':
+        residual = False
+    elif args.net_type == 'residual':
+        residual = True
+    model = model_init_func(
+        in_features=input_dim,
+        out_features=output_dim,
+        dims=(r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim),
+        n_blocks=args.n_blocks,
+        residual=residual
+    ).to(device).float()
+    print(f'Loaded model type: {args.model_type}, blocks: {args.n_blocks}, network: {args.net_type}')
     print(f'param size = {count_parameters_in_M(model)}M')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)

@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets import SomethingSomethingR3M
-from resnet import FullyConnectedResNet
+from resnet import EndtoEndNet, TransferableNet
 from bc_utils import (
     count_parameters_in_M, generate_single_visualization,
     CV_TASKS, CLUSTER_TASKS,
@@ -92,30 +92,24 @@ def main(eval_args):
     output_dim = sum([hand_pose_dim, bbox_dim])
 
     # load model
-    model = None
-    if args.model_type == 'r3m_bc':
-        model = nn.Sequential(OrderedDict([
-            ('batchnorm', nn.BatchNorm1d(input_dim)),
-            ('fc1', nn.Linear(input_dim, 256)),
-            ('relu', nn.ReLU()),
-            ('fc2', nn.Linear(256, output_dim))
-        ])).to(device).float()
-    elif args.model_type == 'resnet8':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=4
-        ).to(device).float()
-    elif args.model_type == 'resnet16':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=8
-        ).to(device).float()
-    elif args.model_type == 'resnet32':
-        model = FullyConnectedResNet(
-            in_features=input_dim, out_features=output_dim, n_res_blocsk=16
-        ).to(device).float()
-    model.load_state_dict(checkpoint['state_dict'], strict=False)
-    model = model.cuda()
-    model.eval()
-    print(f'loaded model {args.model_type} at epoch {checkpoint["epoch"]}')
+    model, model_init_func, residual = None, None, None
+    if args.model_type == 'e2e':
+        model_init_func = EndtoEndNet
+    elif args.model_type == 'transfer':
+        model_init_func = TransferableNet
+    if args.net_type == 'mlp':
+        residual = False
+    elif args.net_type == 'residual':
+        residual = True
+    model = model_init_func(
+        in_features=input_dim,
+        out_features=output_dim,
+        dims=(r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim),
+        n_blocks=args.n_blocks,
+        residual=residual
+    ).to(device).float()
+    print(f'Loaded model type: {args.model_type}, blocks: {args.n_blocks}, '
+          f'arch: {args.model_arch}, network: {args.net_type} at epoch {checkpoint["epoch"]}')
     print(f'param size = {count_parameters_in_M(model)}M')
 
     loss_func = torch.nn.MSELoss()
