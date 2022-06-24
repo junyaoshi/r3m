@@ -1,16 +1,16 @@
 #!/bin/bash
-#SBATCH --mem-per-gpu=24G
+#SBATCH --mem-per-gpu=12G
 #SBATCH --partition=dineshj-compute
 #SBATCH --qos=dineshj-high
 #SBATCH --cpus-per-gpu=4
-#SBATCH --time=24:00:00
+#SBATCH --time=28:00:00
 #SBATCH --gpus=1
-#SBATCH -w node-3090-0
-#SBATCH --job-name=res2
-#SBATCH -o out/res2_t20.out
+#SBATCH -w node-2080ti-5
+#SBATCH --job-name=res4
+#SBATCH -o out/res4_t20.out
 
 export MODEL_TYPE="transfer"
-export N_BLOCKS=2
+export N_BLOCKS=4
 export NET_TYPE="residual"
 export TIME_INTERVAL=20
 export LR=0.0004
@@ -18,14 +18,14 @@ export BETA=1
 export EVAL_FREQ=2
 export SAVE_FREQ=2
 export VIS_FREQ=4000
-export EPOCHS=200
+export EPOCHS=300
 export BATCH_SIZE=64
 export VIS_SAMPLE_SIZE=5
 export TASK_VIS_SAMPLE_SIZE=2
 export NUM_WORKERS=4
 export DATA_HOME_DIR='/scratch/junyao/Datasets/something_something_processed'
 export DATETIME=06191830
-export SAVE="cluster_model=${MODEL_TYPE}_blocks=${N_BLOCKS}_net=${NET_TYPE}_time=${TIME_INTERVAL}_lr=${LR}\
+export SAVE="transfer/cluster_model=${MODEL_TYPE}_blocks=${N_BLOCKS}_net=${NET_TYPE}_time=${TIME_INTERVAL}_lr=${LR}\
 _beta=${BETA}_batch=${BATCH_SIZE}_date=${DATETIME}"
 # export SAVE="cluster_test"
 
@@ -64,6 +64,6 @@ xvfb-run -a python /home/junyao/LfHV/r3m/train_bc.py \
 --num_workers=${NUM_WORKERS} \
 --save=${SAVE} \
 --data_home_dir=${DATA_HOME_DIR} \
---use_visualizer
+--use_visualizer --cont_training
 
 wait
