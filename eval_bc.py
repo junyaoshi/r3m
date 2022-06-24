@@ -1,3 +1,6 @@
+"""
+Outdated. No longer maintained.
+"""
 import argparse
 from collections import OrderedDict
 import time

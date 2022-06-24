@@ -163,18 +163,21 @@ class SomethingSomethingR3M(Dataset):
             future_image_path = '/home' + future_image_path[8:]
         future_image = cv2.imread(future_image_path)
         future_hand_bbox = normalize_bbox(future_hand_bbox, (future_image.shape[1], future_image.shape[0]))
+        future_img_shape = np.array(future_image.shape)[:2]
+        future_joint_depth = future_hand_info['pred_output_list'][0][hand]['pred_joints_img'][:, 2]
 
         return (
             r3m_embedding.squeeze().to(torch.device('cpu')), task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
+            future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
             current_hand_pose_path, future_hand_pose_path
         )
 
 if __name__ == '__main__':
-    debug = False
-    run_on_cv_server = False
+    debug = True
+    run_on_cv_server = True
     num_cpus = 4
 
     if run_on_cv_server:
@@ -227,6 +230,7 @@ if __name__ == '__main__':
             r3m_embedding, task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
+            future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
             current_hand_pose_path, future_hand_pose_path
         ) = data

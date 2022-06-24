@@ -13,7 +13,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from datasets import SomethingSomethingR3M
 from bc_utils import (
-    count_parameters_in_M, AvgrageMeter, generate_single_visualization, CV_TASKS, CLUSTER_TASKS
+    count_parameters_in_M, AvgrageMeter, generate_single_visualization, pose_to_joint_depth,
+    CV_TASKS, CLUSTER_TASKS
 )
 from resnet import EndtoEndNet, TransferableNet
 
@@ -50,8 +51,11 @@ def parse_args():
                         help='perform evaluation after this many epochs')
     parser.add_argument('--save_freq', type=int, default=2,
                         help='save model after this many epochs')
-    parser.add_argument('--vis_freq', type=int, default=100,
+    parser.add_argument('--vis_freq', type=int, default=2000,
                         help='visualize rendered images after this many steps')
+    parser.add_argument('--log_depth_freq', type=int, default=2000,
+                        help='compute and log predicted and ground truth depth '
+                             'using smplx after this many steps of training')
     parser.add_argument('--epochs', type=int, default=200,
                         help='number of training epochs')
     parser.add_argument('--sanity_check', action='store_true', default=False,
@@ -98,7 +102,7 @@ def main(args):
     if args.sanity_check:
         args.eval_on_train = True
         assert args.batch_size <= SANITY_CHECK_SIZE
-        assert args.vis_sample_size <= args.batch_size
+    assert args.vis_sample_size <= args.batch_size
     args.save = join(args.root, args.save)
     print(f'args: \n{args}')
     if torch.cuda.is_available():
@@ -120,7 +124,8 @@ def main(args):
         'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
     )
     smpl_dir = join(args.frankmocap_path, 'extra_data/smpl')
-    hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device=device)
+    hand_mocap_vis = HandMocap(checkpoint_hand, smpl_dir, device=device, batch_size=1)
+    hand_mocap_depth = HandMocap(checkpoint_hand, smpl_dir, device=device, batch_size=args.batch_size)
     os.chdir(args.r3m_path)
 
     # compute dimensions
@@ -148,7 +153,8 @@ def main(args):
     print(f'param size = {count_parameters_in_M(model)}M')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    loss_func = torch.nn.MSELoss()
+    l2_loss_func = nn.MSELoss()
+    l1_loss_func = nn.L1Loss()
 
     print('Creating data loaders...')
     start = time.time()
@@ -204,7 +210,9 @@ def main(args):
         # Training.
         train_stats = train(
             train_queue, model, optimizer, global_step,
-            writer, loss_func, device, visualizer, hand_mocap, task_names, args
+            writer, l2_loss_func, l1_loss_func, device,
+            visualizer, hand_mocap_vis, hand_mocap_depth,
+            task_names, args
         )
         (
             epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss,
@@ -227,7 +235,9 @@ def main(args):
         if epoch % args.eval_freq == 0 or epoch == (args.epochs - 1):
             valid_stats = test(
                 valid_queue, model, global_step,
-                writer, loss_func, device, visualizer, hand_mocap, task_names, args
+                writer, l2_loss_func, l1_loss_func, device,
+                visualizer, hand_mocap_vis, hand_mocap_depth,
+                task_names, args
             )
             (
                 epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss,
@@ -253,8 +263,10 @@ def main(args):
 
     # Final validation.
     valid_stats = test(
-        valid_queue, model, global_step, writer,
-        loss_func, device, visualizer, hand_mocap, task_names, args
+        valid_queue, model, global_step,
+        writer, l2_loss_func, l1_loss_func, device,
+        visualizer, hand_mocap_vis, hand_mocap_depth,
+        task_names, args
     )
     (
         epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss,
@@ -273,7 +285,9 @@ def main(args):
 
 def train(
         train_queue, model, optimizer, global_step,
-        writer, loss_func, device, visualizer, hand_mocap, task_names, args
+        writer, l2_loss_func, l1_loss_func, device,
+        visualizer, hand_mocap_vis, hand_mocap_depth,
+        task_names, args
 ):
     model.train()
     epoch_loss = AvgrageMeter()
@@ -288,6 +302,7 @@ def train(
             r3m_embedding, task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
+            future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
             current_hand_pose_path, future_hand_pose_path
         ) = data
@@ -309,13 +324,13 @@ def train(
             output[:, :future_hand_bbox.size(1)]
         ) # force positive values for bbox output
         pred_hand_pose = output[:, future_hand_bbox.size(1):]
-        bbox_loss = loss_func(pred_hand_bbox, future_hand_bbox)
-        hand_pose_loss = loss_func(pred_hand_pose, future_hand_pose)
+        bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
+        hand_pose_loss = l2_loss_func(pred_hand_pose, future_hand_pose)
         loss = bbox_loss + args.beta * hand_pose_loss
         with torch.no_grad():
-            bl_loss = loss_func(baseline, target)
-            bl_bbox_loss = loss_func(baseline[:, :current_hand_bbox.size(1)], future_hand_bbox)
-            bl_hand_pose_loss = loss_func(baseline[:, current_hand_bbox.size(1):], future_hand_pose)
+            bl_loss = l2_loss_func(baseline, target)
+            bl_bbox_loss = l2_loss_func(baseline[:, :current_hand_bbox.size(1)], future_hand_bbox)
+            bl_hand_pose_loss = l2_loss_func(baseline[:, current_hand_bbox.size(1):], future_hand_pose)
 
         loss.backward()
         optimizer.step()
@@ -326,6 +341,7 @@ def train(
         epoch_bl_bbox_loss.update(bl_bbox_loss.data, 1)
         epoch_bl_hand_pose_loss.update(bl_hand_pose_loss.data, 1)
 
+        # log scalars
         log_freq = 1 if args.sanity_check else 100
         if (global_step + 1) % log_freq == 0:
             writer.add_scalar('train/loss', loss, global_step)
@@ -335,6 +351,24 @@ def train(
             writer.add_scalar('train_baseline/bbox_loss', bl_bbox_loss, global_step)
             writer.add_scalar('train_baseline/hand_pose_loss', bl_hand_pose_loss, global_step)
 
+        # log depth
+        if (global_step + 1) % args.log_depth_freq == 0 and not args.sanity_check:
+            with torch.no_grad():
+                future_joint_depth = future_joint_depth.to(device)
+                future_joint_depth_avg = torch.mean(future_joint_depth, dim=1)
+                pred_joint_depth = pose_to_joint_depth(
+                    hand_mocap_depth, hand, pred_hand_pose, pred_hand_bbox,
+                    future_camera.to(device), future_img_shape.to(device), device,
+                    shape=None, shape_path=future_hand_pose_path
+                )
+                pred_joint_depth_avg = torch.mean(pred_joint_depth, dim=1)
+                joint_depth_loss = l1_loss_func(pred_joint_depth, future_joint_depth)
+                joint_depth_avg_loss = l1_loss_func(pred_joint_depth_avg, future_joint_depth_avg)
+
+            writer.add_scalar('train/joint_depth_loss', joint_depth_loss, global_step)
+            writer.add_scalar('train/joint_depth_avg_loss', joint_depth_avg_loss, global_step)
+
+        # log images
         if (global_step + 1) % args.vis_freq == 0 and not args.sanity_check:
             # visualize some samples in the batch
             vis_imgs = []
@@ -349,7 +383,7 @@ def train(
                     task_names=task_names,
                     task=task[i],
                     visualizer=visualizer,
-                    hand_mocap=hand_mocap,
+                    hand_mocap=hand_mocap_vis,
                     use_visualizer=args.use_visualizer,
                     device=device,
                     run_on_cv_server=args.run_on_cv_server
@@ -396,7 +430,7 @@ def train(
                         task_names=task_names,
                         task=all_task_instances[j],
                         visualizer=visualizer,
-                        hand_mocap=hand_mocap,
+                        hand_mocap=hand_mocap_vis,
                         use_visualizer=args.use_visualizer,
                         device=device,
                         run_on_cv_server=args.run_on_cv_server,
@@ -418,8 +452,12 @@ def train(
     return train_stats
 
 
-def test(valid_queue, model, global_step,
-         writer, loss_func, device, visualizer, hand_mocap, task_names, args):
+def test(
+        valid_queue, model, global_step,
+        writer, l2_loss_func, l1_loss_func, device,
+        visualizer, hand_mocap_vis, hand_mocap_depth,
+        task_names, args
+):
     epoch_loss = AvgrageMeter()
     epoch_bbox_loss = AvgrageMeter()
     epoch_hand_pose_loss = AvgrageMeter()
@@ -427,11 +465,13 @@ def test(valid_queue, model, global_step,
     epoch_bl_bbox_loss = AvgrageMeter()
     epoch_bl_hand_pose_loss = AvgrageMeter()
     model.eval()
+
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):
         (
             r3m_embedding, task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
+            future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
             current_hand_pose_path, future_hand_pose_path
         ) = data
@@ -453,18 +493,34 @@ def test(valid_queue, model, global_step,
                 output[:, :future_hand_bbox.size(1)]
             )  # force positive values for bbox output
             pred_hand_pose = output[:, future_hand_bbox.size(1):]
-            bbox_loss = loss_func(pred_hand_bbox, future_hand_bbox)
-            hand_pose_loss = loss_func(pred_hand_pose, future_hand_pose)
+            bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
+            hand_pose_loss = l2_loss_func(pred_hand_pose, future_hand_pose)
             loss = bbox_loss + args.beta * hand_pose_loss
-            bl_loss = loss_func(baseline, target)
-            bl_bbox_loss = loss_func(baseline[:, :current_hand_bbox.size(1)], future_hand_bbox)
-            bl_hand_pose_loss = loss_func(baseline[:, current_hand_bbox.size(1):], future_hand_pose)
+            bl_loss = l2_loss_func(baseline, target)
+            bl_bbox_loss = l2_loss_func(baseline[:, :current_hand_bbox.size(1)], future_hand_bbox)
+            bl_hand_pose_loss = l2_loss_func(baseline[:, current_hand_bbox.size(1):], future_hand_pose)
         epoch_loss.update(loss.data, input.size(0))
         epoch_bbox_loss.update(bbox_loss.data, input.size(0))
         epoch_hand_pose_loss.update(hand_pose_loss.data, input.size(0))
         epoch_bl_loss.update(bl_loss.data, 1)
         epoch_bl_bbox_loss.update(bl_bbox_loss.data, 1)
         epoch_bl_hand_pose_loss.update(bl_hand_pose_loss.data, 1)
+
+    # log depth
+    with torch.no_grad():
+        future_joint_depth = future_joint_depth.to(device)
+        future_joint_depth_avg = torch.mean(future_joint_depth, dim=1)
+        pred_joint_depth = pose_to_joint_depth(
+            hand_mocap_depth, hand, pred_hand_pose, pred_hand_bbox,
+            future_camera.to(device), future_img_shape.to(device), device,
+            shape=None, shape_path=future_hand_pose_path
+        )
+        pred_joint_depth_avg = torch.mean(pred_joint_depth, dim=1)
+        joint_depth_loss = l1_loss_func(pred_joint_depth, future_joint_depth)
+        joint_depth_avg_loss = l1_loss_func(pred_joint_depth_avg, future_joint_depth_avg)
+
+    writer.add_scalar('valid/joint_depth_loss', joint_depth_loss, global_step)
+    writer.add_scalar('valid/joint_depth_avg_loss', joint_depth_avg_loss, global_step)
 
     # visualize some samples in the batch
     vis_imgs = []
@@ -479,7 +535,7 @@ def test(valid_queue, model, global_step,
             task_names=task_names,
             task=task[i],
             visualizer=visualizer,
-            hand_mocap=hand_mocap,
+            hand_mocap=hand_mocap_vis,
             use_visualizer=args.use_visualizer,
             device=device,
             run_on_cv_server=args.run_on_cv_server
@@ -525,7 +581,7 @@ def test(valid_queue, model, global_step,
                 task_names=task_names,
                 task=all_task_instances[j],
                 visualizer=visualizer,
-                hand_mocap=hand_mocap,
+                hand_mocap=hand_mocap_vis,
                 use_visualizer=args.use_visualizer,
                 device=device,
                 run_on_cv_server=args.run_on_cv_server,
