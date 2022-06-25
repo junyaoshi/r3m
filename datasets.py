@@ -147,23 +147,16 @@ class SomethingSomethingR3M(Dataset):
         current_hand_pose = current_hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
         current_hand_bbox = current_hand_info['hand_bbox_list'][0][hand]
         current_camera = current_hand_info['pred_output_list'][0][hand]['pred_camera']
-        current_image_path = current_hand_info['image_path']
-        if current_image_path[:8] == '/scratch' and self.run_on_cv_server:
-            current_image_path = '/home' + current_image_path[8:]
-        current_image = cv2.imread(current_image_path)
-        current_hand_bbox = normalize_bbox(current_hand_bbox, (current_image.shape[1], current_image.shape[0]))
+        current_img_shape = current_hand_info['image_shape']
+        current_hand_bbox = normalize_bbox(current_hand_bbox, (current_img_shape[1], current_img_shape[0]))
 
         with open(future_hand_pose_path, 'rb') as f:
             future_hand_info = pickle.load(f)
         future_hand_pose = future_hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
         future_hand_bbox = future_hand_info['hand_bbox_list'][0][hand]
         future_camera = future_hand_info['pred_output_list'][0][hand]['pred_camera']
-        future_image_path = future_hand_info['image_path']
-        if future_image_path[:8] == '/scratch' and self.run_on_cv_server:
-            future_image_path = '/home' + future_image_path[8:]
-        future_image = cv2.imread(future_image_path)
-        future_hand_bbox = normalize_bbox(future_hand_bbox, (future_image.shape[1], future_image.shape[0]))
-        future_img_shape = np.array(future_image.shape)[:2]
+        future_img_shape = future_hand_info['image_shape']
+        future_hand_bbox = normalize_bbox(future_hand_bbox, (future_img_shape[1], future_img_shape[0]))
         future_joint_depth = future_hand_info['pred_output_list'][0][hand]['pred_joints_img'][:, 2]
 
         return (
