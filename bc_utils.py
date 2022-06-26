@@ -159,10 +159,12 @@ def _convert_bbox_to_oriIm(data_z, img_shape, hand_bbox, final_size=224):
 
 
 def generate_single_visualization(
-        current_hand_pose_path, future_hand_pose_path, future_cam, hand,
-        pred_hand_bbox, pred_hand_pose,
+        current_hand_pose_path, future_hand_pose_path,
+        future_cam, hand,
+        pred_hand_bbox, pred_hand_pose, pred_hand_shape,
         task_names, task,
-        visualizer, hand_mocap, use_visualizer, device, run_on_cv_server, original_task=False
+        visualizer, hand_mocap,
+        use_visualizer, run_on_cv_server, original_task=False
 ):
     from ss_utils.filter_utils import extract_pred_mesh_list
     from renderer.image_utils import draw_hand_bbox
@@ -211,20 +213,19 @@ def generate_single_visualization(
     )
 
     img_h, img_w, _ = future_img.shape
-    pred_hand_bbox = unnormalize_bbox(pred_hand_bbox, (img_w, img_h))
+    pred_hand_bbox = unnormalize_bbox(pred_hand_bbox.detach().cpu().numpy(), (img_w, img_h))
     pred_hand_bbox[2] = min(pred_hand_bbox[2], img_w - pred_hand_bbox[0])
     pred_hand_bbox[3] = min(pred_hand_bbox[3], img_h - pred_hand_bbox[1])
     pred_hand_bbox_list = future_hand_bbox_list.copy()
     pred_hand_bbox_list[0][hand] = pred_hand_bbox
-    future_hand_betas = future_hand_info['pred_output_list'][0][hand]['pred_hand_betas']
 
     #  get predicted smpl verts and joints,
     if hand == 'left_hand':
         pred_hand_pose[1::3] *= -1
         pred_hand_pose[2::3] *= -1
     pred_verts, _ = hand_mocap.model_regressor.get_smplx_output(
-        torch.Tensor(pred_hand_pose).unsqueeze(0).to(device),
-        torch.Tensor(future_hand_betas).to(device)
+        pred_hand_pose.unsqueeze(0),
+        pred_hand_shape.unsqueeze(0)
     )
 
     # Convert vertices into bbox & image space
@@ -270,7 +271,12 @@ def generate_single_visualization(
     return vis_img.astype(np.uint8)
 
 
-def pose_to_joint_depth(hand_mocap, hand, pose, bbox, cam, img_shape, device, shape, shape_path=None):
+def pose_to_joint_depth(
+        hand_mocap,
+        hand, pose, bbox, cam, img_shape,
+        device,
+        shape, shape_path=None
+):
     assert not (shape is None and shape_path is None)
     if shape is None:
         shape = []

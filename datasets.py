@@ -149,6 +149,7 @@ class SomethingSomethingR3M(Dataset):
         current_camera = current_hand_info['pred_output_list'][0][hand]['pred_camera']
         current_img_shape = current_hand_info['image_shape']
         current_hand_bbox = normalize_bbox(current_hand_bbox, (current_img_shape[1], current_img_shape[0]))
+        current_hand_shape = current_hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
 
         with open(future_hand_pose_path, 'rb') as f:
             future_hand_info = pickle.load(f)
@@ -158,6 +159,7 @@ class SomethingSomethingR3M(Dataset):
         future_img_shape = future_hand_info['image_shape']
         future_hand_bbox = normalize_bbox(future_hand_bbox, (future_img_shape[1], future_img_shape[0]))
         future_joint_depth = future_hand_info['pred_output_list'][0][hand]['pred_joints_img'][:, 2]
+        future_hand_shape = future_hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
 
         return (
             r3m_embedding.squeeze().to(torch.device('cpu')), task, hand,
@@ -165,13 +167,15 @@ class SomethingSomethingR3M(Dataset):
             current_camera, future_camera,
             future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
+            current_hand_shape, future_hand_shape,
             current_hand_pose_path, future_hand_pose_path
         )
 
 if __name__ == '__main__':
-    debug = True
-    run_on_cv_server = True
+    debug = False
+    run_on_cv_server = False
     num_cpus = 4
+    batch_size = 4
 
     if run_on_cv_server:
         task_names = [
@@ -184,24 +188,24 @@ if __name__ == '__main__':
     else:
         task_names = [
             'move_away',
-            'move_towards',
-            'move_down',
-            'move_up',
-            'pull_left',
-            'pull_right',
-            'push_left',
-            'push_right',
-            'push_slightly'
+            # 'move_towards',
+            # 'move_down',
+            # 'move_up',
+            # 'pull_left',
+            # 'pull_right',
+            # 'push_left',
+            # 'push_right',
+            # 'push_slightly'
         ]
         data_home_dir = '/scratch/junyao/Datasets/something_something_processed'
-    start = time.time()
-    train_data = SomethingSomethingR3M(
-        task_names, data_home_dir=data_home_dir, train=True,
-        debug=debug, run_on_cv_server=run_on_cv_server, num_cpus=num_cpus
-    )
-    end = time.time()
-    print(f'Loaded train data. Time: {end - start}')
-    print(f'Number of train data: {len(train_data)}')
+    # start = time.time()
+    # train_data = SomethingSomethingR3M(
+    #     task_names, data_home_dir=data_home_dir, train=True,
+    #     debug=debug, run_on_cv_server=run_on_cv_server, num_cpus=num_cpus
+    # )
+    # end = time.time()
+    # print(f'Loaded train data. Time: {end - start}')
+    # print(f'Number of train data: {len(train_data)}')
 
     start = time.time()
     valid_data = SomethingSomethingR3M(
@@ -214,7 +218,7 @@ if __name__ == '__main__':
 
     print('Creating data loaders...')
     valid_queue = torch.utils.data.DataLoader(
-        valid_data, batch_size=10, shuffle=True,
+        valid_data, batch_size=batch_size, shuffle=True,
         num_workers=0 if debug else num_cpus, drop_last=True)
 
     print('Creating data loaders: done')
@@ -225,7 +229,11 @@ if __name__ == '__main__':
             current_camera, future_camera,
             future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
+            current_hand_shape, future_hand_shape,
             current_hand_pose_path, future_hand_pose_path
         ) = data
+        print(f'future_img_shape: \n{future_img_shape}')
+        print(f'current_hand_shape: \n{current_hand_shape}')
+        print(f'future_hand_shape: \n{future_hand_shape}')
         if step == 3:
             break

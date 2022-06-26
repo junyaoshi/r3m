@@ -20,6 +20,7 @@ from resnet import EndtoEndNet, TransferableNet
 
 SANITY_CHECK_SIZE = 10
 
+
 def parse_args():
     """
     Parse input arguments
@@ -45,8 +46,12 @@ def parse_args():
                         help='how many frames into the future to predict')
     parser.add_argument('--lr', type=float, default=0.001,
                         help='learning rate')
-    parser.add_argument('--beta', type=float, default=1.0,
-                        help='hyperparameter for balancing hand pose and bbox losses')
+    parser.add_argument('--lambda1', type=float, default=1.0,
+                        help='weight for hand bbox loss, set to 0 to disable hand bbox prediction')
+    parser.add_argument('--lambda2', type=float, default=1.0,
+                        help='weight for hand pose lossset to 0 to disable hand pose prediction')
+    parser.add_argument('--lambda3', type=float, default=1.0,
+                        help='weight for hand shape lossset to 0 to disable hand shape prediction')
     parser.add_argument('--eval_freq', type=int, default=1,
                         help='perform evaluation after this many epochs')
     parser.add_argument('--save_freq', type=int, default=2,
@@ -104,7 +109,15 @@ def main(args):
         assert args.batch_size <= SANITY_CHECK_SIZE
     assert args.vis_sample_size <= args.batch_size
     args.save = join(args.root, args.save)
+    assert (args.lambda1 >= 0) and (args.lambda2 >= 0) and (args.lambda3 >= 0)
+    args.predict_hand_bbox = args.lambda1 != 0.
+    args.predict_hand_pose = args.lambda2 != 0.
+    args.predict_hand_shape = args.lambda3 != 0.
+    assert args.predict_hand_bbox or args.predict_hand_pose or args.predict_hand_shape
     print(f'args: \n{args}')
+    print(f'Predicting hand bbox: {args.predict_hand_bbox}.')
+    print(f'Predicting hand pose: {args.predict_hand_pose}.')
+    print(f'Predicting hand shape: {args.predict_hand_shape}.')
     if torch.cuda.is_available():
         device = "cuda"
     else:
@@ -114,6 +127,7 @@ def main(args):
     writer = SummaryWriter(log_dir=args.save, flush_secs=60)
 
     # visualizer and frank mocap
+    print('Loading frankmocap visualizer...')
     sys.path.insert(1, args.frankmocap_path)
     os.chdir(args.frankmocap_path)
     from renderer.visualizer import Visualizer
@@ -127,11 +141,14 @@ def main(args):
     hand_mocap_vis = HandMocap(checkpoint_hand, smpl_dir, device=device, batch_size=1)
     hand_mocap_depth = HandMocap(checkpoint_hand, smpl_dir, device=device, batch_size=args.batch_size)
     os.chdir(args.r3m_path)
+    print('Visualizer loaded.')
 
     # compute dimensions
-    r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim = 2048, len(task_names), 48, 4, 3
-    input_dim = sum([r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim, cam_dim])
-    output_dim = sum([hand_pose_dim, bbox_dim])
+    r3m_dim, task_dim, cam_dim = 2048, len(task_names), 3
+    args.hand_bbox_dim, args.hand_pose_dim, args.hand_shape_dim = 4, 48, 10
+    hand_dim = sum([args.hand_bbox_dim, args.hand_pose_dim, args.hand_shape_dim])
+    input_dim = sum([r3m_dim, task_dim, hand_dim, cam_dim, cam_dim])
+    output_dim = hand_dim
 
     model, model_init_func, residual = None, None, None
     if args.model_type == 'e2e':
@@ -145,7 +162,7 @@ def main(args):
     model = model_init_func(
         in_features=input_dim,
         out_features=output_dim,
-        dims=(r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim),
+        dims=(r3m_dim, task_dim, hand_dim),
         n_blocks=args.n_blocks,
         residual=residual
     ).to(device).float()
@@ -215,21 +232,26 @@ def main(args):
             task_names, args
         )
         (
-            epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss,
-            epoch_bl_loss, epoch_bl_bbox_loss, epoch_bl_hand_pose_loss,
+            epoch_loss, epoch_hand_bbox_loss, epoch_hand_pose_loss, epoch_hand_shape_loss,
+            epoch_bl_loss, epoch_bl_hand_bbox_loss, epoch_bl_hand_pose_loss, epoch_bl_hand_shape_loss,
             global_step
         ) = train_stats
         print(f'epoch train loss: {epoch_loss}')
-        print(f'epoch train bbox loss: {epoch_bbox_loss}')
+        print(f'epoch train hand bbox loss: {epoch_hand_bbox_loss}')
         print(f'epoch train hand pose loss: {epoch_hand_pose_loss}')
+        print(f'epoch train hand shape loss: {epoch_hand_shape_loss}')
         writer.add_scalar('train_epoch/loss', epoch_loss, epoch)
-        writer.add_scalar('train_epoch/bbox_loss', epoch_bbox_loss, epoch)
+        writer.add_scalar('train_epoch/hand_bbox_loss', epoch_hand_bbox_loss, epoch)
         writer.add_scalar('train_epoch/hand_pose_loss', epoch_hand_pose_loss, epoch)
+        writer.add_scalar('train_epoch/hand_shape_loss', epoch_hand_shape_loss, epoch)
         writer.add_scalar('train_epoch_baseline/loss', epoch_bl_loss, epoch)
-        writer.add_scalar('train_epoch_baseline/bbox_loss', epoch_bl_bbox_loss, epoch)
+        writer.add_scalar('train_epoch_baseline/hand_bbox_loss', epoch_bl_hand_bbox_loss, epoch)
         writer.add_scalar('train_epoch_baseline/hand_pose_loss', epoch_bl_hand_pose_loss, epoch)
+        writer.add_scalar('train_epoch_baseline/hand_shape_loss', epoch_bl_hand_shape_loss, epoch)
         writer.add_scalar('stats/epoch_steps', global_step, epoch)
-        writer.add_scalar('stats/beta', args.beta, epoch)
+        writer.add_scalar('stats/lambda1', args.lambda1, epoch)
+        writer.add_scalar('stats/lambda2', args.lambda2, epoch)
+        writer.add_scalar('stats/lambda3', args.lambda3, epoch)
 
         # Evaluation.
         if epoch % args.eval_freq == 0 or epoch == (args.epochs - 1):
@@ -240,18 +262,21 @@ def main(args):
                 task_names, args
             )
             (
-                epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss,
-                epoch_bl_loss, epoch_bl_bbox_loss, epoch_bl_hand_pose_loss
+                epoch_loss, epoch_hand_bbox_loss, epoch_hand_pose_loss, epoch_hand_shape_loss,
+                epoch_bl_loss, epoch_bl_hand_bbox_loss, epoch_bl_hand_pose_loss, epoch_bl_hand_shape_loss
             ) = valid_stats
             print(f'epoch valid loss: {epoch_loss}')
-            print(f'epoch valid bbox loss: {epoch_bbox_loss}')
+            print(f'epoch valid hand bbox loss: {epoch_hand_bbox_loss}')
             print(f'epoch valid hand pose loss: {epoch_hand_pose_loss}')
+            print(f'epoch valid hand shape loss: {epoch_hand_shape_loss}')
             writer.add_scalar('valid/loss', epoch_loss, epoch)
-            writer.add_scalar('valid/bbox_loss', epoch_bbox_loss, epoch)
+            writer.add_scalar('valid/hand_bbox_loss', epoch_hand_bbox_loss, epoch)
             writer.add_scalar('valid/hand_pose_loss', epoch_hand_pose_loss, epoch)
+            writer.add_scalar('valid/hand_shape_loss', epoch_hand_shape_loss, epoch)
             writer.add_scalar('valid_baseline/loss', epoch_bl_loss, epoch)
-            writer.add_scalar('valid_baseline/bbox_loss', epoch_bl_bbox_loss, epoch)
+            writer.add_scalar('valid_baseline/hand_bbox_loss', epoch_bl_hand_bbox_loss, epoch)
             writer.add_scalar('valid_baseline/hand_pose_loss', epoch_bl_hand_pose_loss, epoch)
+            writer.add_scalar('valid_baseline/hand_shape_loss', epoch_bl_hand_shape_loss, epoch)
 
         # Save model.
         if epoch % args.save_freq == 0 or epoch == (args.epochs - 1):
@@ -269,18 +294,21 @@ def main(args):
         task_names, args
     )
     (
-        epoch_loss, epoch_bbox_loss, epoch_hand_pose_loss,
-        epoch_bl_loss, epoch_bl_bbox_loss, epoch_bl_hand_pose_loss
+        epoch_loss, epoch_hand_bbox_loss, epoch_hand_pose_loss, epoch_hand_shape_loss,
+        epoch_bl_loss, epoch_bl_hand_bbox_loss, epoch_bl_hand_pose_loss, epoch_bl_hand_shape_loss
     ) = valid_stats
     print(f'final epoch valid loss: {epoch_loss}')
-    print(f'final epoch valid bbox loss: {epoch_bbox_loss}')
+    print(f'final epoch valid hand bbox loss: {epoch_hand_bbox_loss}')
     print(f'final epoch valid hand pose loss: {epoch_hand_pose_loss}')
+    print(f'final epoch valid hand shape loss: {epoch_hand_shape_loss}')
     writer.add_scalar('valid/loss', epoch_loss, args.epochs)
-    writer.add_scalar('valid/bbox_loss', epoch_bbox_loss, args.epochs)
+    writer.add_scalar('valid/hand_bbox_loss', epoch_hand_bbox_loss, args.epochs)
     writer.add_scalar('valid/hand_pose_loss', epoch_hand_pose_loss, args.epochs)
+    writer.add_scalar('valid/hand_shape_loss', epoch_hand_shape_loss, args.epochs)
     writer.add_scalar('valid_baseline/loss', epoch_bl_loss, args.epochs)
-    writer.add_scalar('valid_baseline/bbox_loss', epoch_bl_bbox_loss, args.epochs)
+    writer.add_scalar('valid_baseline/hand_bbox_loss', epoch_bl_hand_bbox_loss, args.epochs)
     writer.add_scalar('valid_baseline/hand_pose_loss', epoch_bl_hand_pose_loss, args.epochs)
+    writer.add_scalar('valid_baseline/hand_shape_loss', epoch_bl_hand_shape_loss, args.epochs)
 
 
 def train(
@@ -291,11 +319,13 @@ def train(
 ):
     model.train()
     epoch_loss = AvgrageMeter()
-    epoch_bbox_loss = AvgrageMeter()
+    epoch_hand_bbox_loss = AvgrageMeter()
     epoch_hand_pose_loss = AvgrageMeter()
+    epoch_hand_shape_loss = AvgrageMeter()
     epoch_bl_loss = AvgrageMeter()
-    epoch_bl_bbox_loss = AvgrageMeter()
+    epoch_bl_hand_bbox_loss = AvgrageMeter()
     epoch_bl_hand_pose_loss = AvgrageMeter()
+    epoch_bl_hand_shape_loss = AvgrageMeter()
 
     for step, data in tqdm(enumerate(train_queue), desc='Going through train data...'):
         (
@@ -304,52 +334,64 @@ def train(
             current_camera, future_camera,
             future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
+            current_hand_shape, future_hand_shape,
             current_hand_pose_path, future_hand_pose_path
         ) = data
         input = torch.cat((
-            r3m_embedding, task, current_hand_bbox, current_hand_pose, current_camera, future_camera
+            r3m_embedding, task,
+            current_hand_bbox, current_hand_pose, current_hand_shape,
+            current_camera, future_camera
         ), dim=1).to(device).float()
-        target = torch.cat((
-            future_hand_bbox, future_hand_pose
-        ), dim=1).to(device).float()
-        baseline = torch.cat((
-            current_hand_bbox, current_hand_pose
-        ), dim=1).to(device).float()
+        current_hand_bbox = current_hand_bbox.to(device).float()
+        current_hand_pose = current_hand_pose.to(device)
+        current_hand_shape = current_hand_shape.to(device)
         future_hand_bbox = future_hand_bbox.to(device).float()
         future_hand_pose = future_hand_pose.to(device)
+        future_hand_shape = future_hand_shape.to(device)
 
         optimizer.zero_grad()
         output = model(input)
         pred_hand_bbox = torch.sigmoid(
-            output[:, :future_hand_bbox.size(1)]
-        ) # force positive values for bbox output
-        pred_hand_pose = output[:, future_hand_bbox.size(1):]
-        bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
+            output[:, :args.hand_bbox_dim]
+        )  # force positive values for bbox output
+        pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+        pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
+        hand_bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
         hand_pose_loss = l2_loss_func(pred_hand_pose, future_hand_pose)
-        loss = bbox_loss + args.beta * hand_pose_loss
+        hand_shape_loss = l2_loss_func(pred_hand_shape, future_hand_shape)
+        loss = args.lambda1 * hand_bbox_loss + \
+               args.lambda2 * hand_pose_loss + \
+               args.lambda3 * hand_shape_loss
         with torch.no_grad():
-            bl_loss = l2_loss_func(baseline, target)
-            bl_bbox_loss = l2_loss_func(baseline[:, :current_hand_bbox.size(1)], future_hand_bbox)
-            bl_hand_pose_loss = l2_loss_func(baseline[:, current_hand_bbox.size(1):], future_hand_pose)
+            bl_hand_bbox_loss = l2_loss_func(current_hand_bbox, future_hand_bbox)
+            bl_hand_pose_loss = l2_loss_func(current_hand_pose, future_hand_pose)
+            bl_hand_shape_loss = l2_loss_func(current_hand_shape, future_hand_shape)
+            bl_loss = args.lambda1 * bl_hand_bbox_loss + \
+                      args.lambda2 * bl_hand_pose_loss + \
+                      args.lambda3 * bl_hand_shape_loss
 
         loss.backward()
         optimizer.step()
         epoch_loss.update(loss.data, 1)
-        epoch_bbox_loss.update(bbox_loss.data, 1)
+        epoch_hand_bbox_loss.update(hand_bbox_loss.data, 1)
         epoch_hand_pose_loss.update(hand_pose_loss.data, 1)
+        epoch_hand_shape_loss.update(hand_shape_loss.data, 1)
         epoch_bl_loss.update(bl_loss.data, 1)
-        epoch_bl_bbox_loss.update(bl_bbox_loss.data, 1)
+        epoch_bl_hand_bbox_loss.update(bl_hand_bbox_loss.data, 1)
         epoch_bl_hand_pose_loss.update(bl_hand_pose_loss.data, 1)
+        epoch_bl_hand_shape_loss.update(bl_hand_shape_loss.data, 1)
 
         # log scalars
         log_freq = 1 if args.sanity_check else 100
         if (global_step + 1) % log_freq == 0:
             writer.add_scalar('train/loss', loss, global_step)
-            writer.add_scalar('train/bbox_loss', bbox_loss, global_step)
+            writer.add_scalar('train/hand_bbox_loss', hand_bbox_loss, global_step)
             writer.add_scalar('train/hand_pose_loss', hand_pose_loss, global_step)
+            writer.add_scalar('train/hand_shape_loss', hand_shape_loss, global_step)
             writer.add_scalar('train_baseline/loss', bl_loss, global_step)
-            writer.add_scalar('train_baseline/bbox_loss', bl_bbox_loss, global_step)
+            writer.add_scalar('train_baseline/hand_bbox_loss', bl_hand_bbox_loss, global_step)
             writer.add_scalar('train_baseline/hand_pose_loss', bl_hand_pose_loss, global_step)
+            writer.add_scalar('train_baseline/hand_shape_loss', bl_hand_shape_loss, global_step)
 
         # log depth
         if (global_step + 1) % args.log_depth_freq == 0 and not args.sanity_check:
@@ -357,9 +399,15 @@ def train(
                 future_joint_depth = future_joint_depth.to(device)
                 future_joint_depth_avg = torch.mean(future_joint_depth, dim=1)
                 pred_joint_depth = pose_to_joint_depth(
-                    hand_mocap_depth, hand, pred_hand_pose, pred_hand_bbox,
-                    future_camera.to(device), future_img_shape.to(device), device,
-                    shape=None, shape_path=future_hand_pose_path
+                    hand_mocap=hand_mocap_depth,
+                    hand=hand,
+                    pose=pred_hand_pose if args.predict_hand_pose else future_hand_pose,
+                    bbox=pred_hand_bbox if args.predict_hand_bbox else future_hand_bbox,
+                    cam=future_camera.to(device),
+                    img_shape=future_img_shape.to(device),
+                    device=device,
+                    shape=pred_hand_shape if args.predict_hand_shape else future_hand_shape,
+                    shape_path=None
                 )
                 pred_joint_depth_avg = torch.mean(pred_joint_depth, dim=1)
                 joint_depth_loss = l1_loss_func(pred_joint_depth, future_joint_depth)
@@ -378,14 +426,14 @@ def train(
                     future_hand_pose_path=future_hand_pose_path[i],
                     future_cam=future_camera[i].cpu().numpy(),
                     hand=hand[i],
-                    pred_hand_bbox=pred_hand_bbox[i].detach().cpu().numpy(),
-                    pred_hand_pose=pred_hand_pose[i].detach().cpu().numpy(),
+                    pred_hand_bbox=pred_hand_bbox[i] if args.predict_hand_bbox else future_hand_bbox[i],
+                    pred_hand_pose=pred_hand_pose[i] if args.predict_hand_pose else future_hand_pose[i],
+                    pred_hand_shape=pred_hand_shape[i] if args.predict_hand_shape else future_hand_shape[i],
                     task_names=task_names,
                     task=task[i],
                     visualizer=visualizer,
                     hand_mocap=hand_mocap_vis,
                     use_visualizer=args.use_visualizer,
-                    device=device,
                     run_on_cv_server=args.run_on_cv_server
                 )
                 vis_imgs.append(vis_img)
@@ -403,20 +451,25 @@ def train(
                 all_task_instances = torch.vstack(all_task_instances)
 
                 task_conditioned_input = torch.cat((
-                    r3m_embedding[i].repeat(len(task_names), 1),
-                    all_task_instances,
+                    r3m_embedding[i].repeat(len(task_names), 1).to(device),
+                    all_task_instances.to(device),
                     current_hand_bbox[i].repeat(len(task_names), 1),
                     current_hand_pose[i].repeat(len(task_names), 1),
-                    current_camera[i].repeat(len(task_names), 1),
-                    future_camera[i].repeat(len(task_names), 1)
-                ), dim=1).to(device).float()
+                    current_hand_shape[i].repeat(len(task_names), 1),
+                    current_camera[i].repeat(len(task_names), 1).to(device),
+                    future_camera[i].repeat(len(task_names), 1).to(device)
+                ), dim=1).float()
+
                 model.eval()
                 with torch.no_grad():
                     task_conditioned_output = model(task_conditioned_input)
                     task_pred_hand_bbox = torch.sigmoid(
-                        task_conditioned_output[:, :future_hand_bbox.size(1)]
+                        task_conditioned_output[:, :args.hand_bbox_dim]
                     )  # force positive values for bbox output
-                    task_pred_hand_pose = task_conditioned_output[:, future_hand_bbox.size(1):]
+                    task_pred_hand_pose = task_conditioned_output[:,
+                                          args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+                    task_pred_hand_shape = task_conditioned_output[:,
+                                           (args.hand_bbox_dim + args.hand_pose_dim):]
 
                 task_vis_imgs = []
                 for j, task_name in enumerate(task_names):
@@ -425,14 +478,14 @@ def train(
                         future_hand_pose_path=future_hand_pose_path[i],
                         future_cam=future_camera[i].cpu().numpy(),
                         hand=hand[i],
-                        pred_hand_bbox=task_pred_hand_bbox[j].detach().cpu().numpy(),
-                        pred_hand_pose=task_pred_hand_pose[j].detach().cpu().numpy(),
+                        pred_hand_bbox=task_pred_hand_bbox[j] if args.predict_hand_bbox else future_hand_bbox[i],
+                        pred_hand_pose=task_pred_hand_pose[j] if args.predict_hand_pose else future_hand_pose[i],
+                        pred_hand_shape=task_pred_hand_shape[j] if args.predict_hand_shape else future_hand_shape[i],
                         task_names=task_names,
                         task=all_task_instances[j],
                         visualizer=visualizer,
                         hand_mocap=hand_mocap_vis,
                         use_visualizer=args.use_visualizer,
-                        device=device,
                         run_on_cv_server=args.run_on_cv_server,
                         original_task=True if task_name == original_task_name else False
                     )
@@ -445,8 +498,8 @@ def train(
         global_step += 1
 
     train_stats = (
-        epoch_loss.avg, epoch_bbox_loss.avg, epoch_hand_pose_loss.avg,
-        epoch_bl_loss.avg, epoch_bl_bbox_loss.avg, epoch_bl_hand_pose_loss.avg,
+        epoch_loss.avg, epoch_hand_bbox_loss.avg, epoch_hand_pose_loss.avg, epoch_hand_shape_loss.avg,
+        epoch_bl_loss.avg, epoch_bl_hand_bbox_loss.avg, epoch_bl_hand_pose_loss.avg, epoch_bl_hand_shape_loss.avg,
         global_step
     )
     return train_stats
@@ -459,11 +512,13 @@ def test(
         task_names, args
 ):
     epoch_loss = AvgrageMeter()
-    epoch_bbox_loss = AvgrageMeter()
+    epoch_hand_bbox_loss = AvgrageMeter()
     epoch_hand_pose_loss = AvgrageMeter()
+    epoch_hand_shape_loss = AvgrageMeter()
     epoch_bl_loss = AvgrageMeter()
-    epoch_bl_bbox_loss = AvgrageMeter()
+    epoch_bl_hand_bbox_loss = AvgrageMeter()
     epoch_bl_hand_pose_loss = AvgrageMeter()
+    epoch_bl_hand_shape_loss = AvgrageMeter()
     model.eval()
 
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):
@@ -473,47 +528,63 @@ def test(
             current_camera, future_camera,
             future_img_shape, future_joint_depth,
             current_hand_pose, future_hand_pose,
+            current_hand_shape, future_hand_shape,
             current_hand_pose_path, future_hand_pose_path
         ) = data
         input = torch.cat((
-            r3m_embedding, task, current_hand_bbox, current_hand_pose, current_camera, future_camera
+            r3m_embedding, task,
+            current_hand_bbox, current_hand_pose, current_hand_shape,
+            current_camera, future_camera
         ), dim=1).to(device).float()
-        target = torch.cat((
-            future_hand_bbox, future_hand_pose
-        ), dim=1).to(device).float()
-        baseline = torch.cat((
-            current_hand_bbox, current_hand_pose
-        ), dim=1).to(device).float()
+        current_hand_bbox = current_hand_bbox.to(device).float()
+        current_hand_pose = current_hand_pose.to(device)
+        current_hand_shape = current_hand_shape.to(device)
         future_hand_bbox = future_hand_bbox.to(device).float()
         future_hand_pose = future_hand_pose.to(device)
+        future_hand_shape = future_hand_shape.to(device)
 
         with torch.no_grad():
             output = model(input)
             pred_hand_bbox = torch.sigmoid(
-                output[:, :future_hand_bbox.size(1)]
+                output[:, :args.hand_bbox_dim]
             )  # force positive values for bbox output
-            pred_hand_pose = output[:, future_hand_bbox.size(1):]
-            bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
+            pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+            pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
+            hand_bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
             hand_pose_loss = l2_loss_func(pred_hand_pose, future_hand_pose)
-            loss = bbox_loss + args.beta * hand_pose_loss
-            bl_loss = l2_loss_func(baseline, target)
-            bl_bbox_loss = l2_loss_func(baseline[:, :current_hand_bbox.size(1)], future_hand_bbox)
-            bl_hand_pose_loss = l2_loss_func(baseline[:, current_hand_bbox.size(1):], future_hand_pose)
+            hand_shape_loss = l2_loss_func(pred_hand_shape, future_hand_shape)
+            loss = args.lambda1 * hand_bbox_loss + \
+                   args.lambda2 * hand_pose_loss + \
+                   args.lambda3 * hand_shape_loss
+            bl_hand_bbox_loss = l2_loss_func(current_hand_bbox, future_hand_bbox)
+            bl_hand_pose_loss = l2_loss_func(current_hand_pose, future_hand_pose)
+            bl_hand_shape_loss = l2_loss_func(current_hand_shape, future_hand_shape)
+            bl_loss = args.lambda1 * bl_hand_bbox_loss + \
+                      args.lambda2 * bl_hand_pose_loss + \
+                      args.lambda3 * bl_hand_shape_loss
         epoch_loss.update(loss.data, input.size(0))
-        epoch_bbox_loss.update(bbox_loss.data, input.size(0))
+        epoch_hand_bbox_loss.update(hand_bbox_loss.data, input.size(0))
         epoch_hand_pose_loss.update(hand_pose_loss.data, input.size(0))
-        epoch_bl_loss.update(bl_loss.data, 1)
-        epoch_bl_bbox_loss.update(bl_bbox_loss.data, 1)
-        epoch_bl_hand_pose_loss.update(bl_hand_pose_loss.data, 1)
+        epoch_hand_shape_loss.update(hand_shape_loss.data, input.size(0))
+        epoch_bl_loss.update(bl_loss.data, input.size(0))
+        epoch_bl_hand_bbox_loss.update(bl_hand_bbox_loss.data, input.size(0))
+        epoch_bl_hand_pose_loss.update(bl_hand_pose_loss.data, input.size(0))
+        epoch_bl_hand_shape_loss.update(bl_hand_shape_loss.data, input.size(0))
 
     # log depth
     with torch.no_grad():
         future_joint_depth = future_joint_depth.to(device)
         future_joint_depth_avg = torch.mean(future_joint_depth, dim=1)
         pred_joint_depth = pose_to_joint_depth(
-            hand_mocap_depth, hand, pred_hand_pose, pred_hand_bbox,
-            future_camera.to(device), future_img_shape.to(device), device,
-            shape=None, shape_path=future_hand_pose_path
+            hand_mocap=hand_mocap_depth,
+            hand=hand,
+            pose=pred_hand_pose if args.predict_hand_pose else future_hand_pose,
+            bbox=pred_hand_bbox if args.predict_hand_bbox else future_hand_bbox,
+            cam=future_camera.to(device),
+            img_shape=future_img_shape.to(device),
+            device=device,
+            shape=pred_hand_shape if args.predict_hand_shape else future_hand_shape,
+            shape_path=None
         )
         pred_joint_depth_avg = torch.mean(pred_joint_depth, dim=1)
         joint_depth_loss = l1_loss_func(pred_joint_depth, future_joint_depth)
@@ -530,14 +601,14 @@ def test(
             future_hand_pose_path=future_hand_pose_path[i],
             future_cam=future_camera[i].cpu().numpy(),
             hand=hand[i],
-            pred_hand_bbox=pred_hand_bbox[i].detach().cpu().numpy(),
-            pred_hand_pose=pred_hand_pose[i].detach().cpu().numpy(),
+            pred_hand_bbox=pred_hand_bbox[i] if args.predict_hand_bbox else future_hand_bbox[i],
+            pred_hand_pose=pred_hand_pose[i] if args.predict_hand_pose else future_hand_pose[i],
+            pred_hand_shape=pred_hand_shape[i] if args.predict_hand_shape else future_hand_shape[i],
             task_names=task_names,
             task=task[i],
             visualizer=visualizer,
             hand_mocap=hand_mocap_vis,
             use_visualizer=args.use_visualizer,
-            device=device,
             run_on_cv_server=args.run_on_cv_server
         )
         vis_imgs.append(vis_img)
@@ -555,19 +626,23 @@ def test(
         all_task_instances = torch.vstack(all_task_instances)
 
         task_conditioned_input = torch.cat((
-            r3m_embedding[i].repeat(len(task_names), 1),
-            all_task_instances,
+            r3m_embedding[i].repeat(len(task_names), 1).to(device),
+            all_task_instances.to(device),
             current_hand_bbox[i].repeat(len(task_names), 1),
             current_hand_pose[i].repeat(len(task_names), 1),
-            current_camera[i].repeat(len(task_names), 1),
-            future_camera[i].repeat(len(task_names), 1)
-        ), dim=1).to(device).float()
+            current_hand_shape[i].repeat(len(task_names), 1),
+            current_camera[i].repeat(len(task_names), 1).to(device),
+            future_camera[i].repeat(len(task_names), 1).to(device)
+        ), dim=1).float()
         with torch.no_grad():
             task_conditioned_output = model(task_conditioned_input)
             task_pred_hand_bbox = torch.sigmoid(
-                task_conditioned_output[:, :future_hand_bbox.size(1)]
+                task_conditioned_output[:, :args.hand_bbox_dim]
             )  # force positive values for bbox output
-            task_pred_hand_pose = task_conditioned_output[:, future_hand_bbox.size(1):]
+            task_pred_hand_pose = task_conditioned_output[:,
+                                  args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+            task_pred_hand_shape = task_conditioned_output[:,
+                                   (args.hand_bbox_dim + args.hand_pose_dim):]
 
         task_vis_imgs = []
         for j, task_name in enumerate(task_names):
@@ -576,14 +651,14 @@ def test(
                 future_hand_pose_path=future_hand_pose_path[i],
                 future_cam=future_camera[i].cpu().numpy(),
                 hand=hand[i],
-                pred_hand_bbox=task_pred_hand_bbox[j].detach().cpu().numpy(),
-                pred_hand_pose=task_pred_hand_pose[j].detach().cpu().numpy(),
+                pred_hand_bbox=task_pred_hand_bbox[j] if args.predict_hand_bbox else future_hand_bbox[i],
+                pred_hand_pose=task_pred_hand_pose[j] if args.predict_hand_pose else future_hand_pose[i],
+                pred_hand_shape=task_pred_hand_shape[j] if args.predict_hand_shape else future_hand_shape[i],
                 task_names=task_names,
                 task=all_task_instances[j],
                 visualizer=visualizer,
                 hand_mocap=hand_mocap_vis,
                 use_visualizer=args.use_visualizer,
-                device=device,
                 run_on_cv_server=args.run_on_cv_server,
                 original_task=True if task_name == original_task_name else False
             )
@@ -592,8 +667,8 @@ def test(
         writer.add_image(f'valid/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
 
     valid_stats = (
-        epoch_loss.avg, epoch_bbox_loss.avg, epoch_hand_pose_loss.avg,
-        epoch_bl_loss.avg, epoch_bl_bbox_loss.avg, epoch_bl_hand_pose_loss.avg
+        epoch_loss.avg, epoch_hand_bbox_loss.avg, epoch_hand_pose_loss.avg, epoch_hand_shape_loss.avg,
+        epoch_bl_loss.avg, epoch_bl_hand_bbox_loss.avg, epoch_bl_hand_pose_loss.avg, epoch_bl_hand_shape_loss.avg,
     )
 
     return valid_stats

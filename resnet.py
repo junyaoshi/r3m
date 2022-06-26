@@ -111,8 +111,8 @@ class TransferableNet(nn.Module):
         the non-hand feature extractor is transferable
         """
         super().__init__()
-        r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim = dims
-        self.hand_features = hand_pose_dim + bbox_dim
+        r3m_dim, task_dim, hand_dim = dims
+        self.hand_features = hand_dim
         self.r3m_features, self.task_features = r3m_dim, task_dim
         self.residual = residual
 
@@ -171,13 +171,15 @@ class TransferableNet(nn.Module):
 
 
 if __name__ == '__main__':
-    r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim = 2048, 4, 48, 4, 3
-    input_dim = sum([r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim, cam_dim])
-    output_dim = sum([hand_pose_dim, bbox_dim])
-    resnet = EndtoEndNet(
+    r3m_dim, task_dim, cam_dim = 2048, 9, 3
+    hand_bbox_dim, hand_pose_dim, hand_shape_dim = 4, 48, 10
+    hand_dim = sum([hand_bbox_dim, hand_pose_dim, hand_shape_dim])
+    input_dim = sum([r3m_dim, task_dim, hand_dim, cam_dim, cam_dim])
+    output_dim = hand_dim
+    resnet = TransferableNet(
         in_features=input_dim,
         out_features=output_dim,
-        dims=(r3m_dim, task_dim, hand_pose_dim, bbox_dim, cam_dim),
+        dims=(r3m_dim, task_dim, hand_dim),
         n_blocks=0,
         residual=False
     ).to('cuda')
