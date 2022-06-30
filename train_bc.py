@@ -49,9 +49,9 @@ def parse_args():
     parser.add_argument('--lambda1', type=float, default=1.0,
                         help='weight for hand bbox loss, set to 0 to disable hand bbox prediction')
     parser.add_argument('--lambda2', type=float, default=1.0,
-                        help='weight for hand pose lossset to 0 to disable hand pose prediction')
+                        help='weight for hand pose loss, set to 0 to disable hand pose prediction')
     parser.add_argument('--lambda3', type=float, default=1.0,
-                        help='weight for hand shape lossset to 0 to disable hand shape prediction')
+                        help='weight for hand shape loss, set to 0 to disable hand shape prediction')
     parser.add_argument('--eval_freq', type=int, default=1,
                         help='perform evaluation after this many epochs')
     parser.add_argument('--save_freq', type=int, default=2,
@@ -70,9 +70,10 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64,
                         help='batch size per GPU')
     parser.add_argument('--vis_sample_size', type=int, default=5,
-                        help='number of samples to visualize on tensorboard')
+                        help='number of samples to visualize on tensorboard, set to 0 to disable')
     parser.add_argument('--task_vis_sample_size', type=int, default=2,
-                        help='number of task-conditioned samples to visualize on tensorboard')
+                        help='number of task-conditioned samples to visualize on tensorboard, '
+                             'set to 0 to disable')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='number of workers for dataloaders')
     parser.add_argument('--cont_training', action='store_true', default=False,
@@ -209,16 +210,22 @@ def main(args):
     print('Creating data loaders: done')
 
     if args.cont_training:
-        checkpoint_name = sorted([f for f in os.listdir(args.save) if 'checkpoint' in f])[-1]
-        checkpoint_file = os.path.join(args.save, checkpoint_name)
-        print(f'loading checkpoint: {checkpoint_file}')
-        checkpoint = torch.load(checkpoint_file, map_location='cpu')
-        init_epoch = checkpoint['epoch'] + 1
-        model.load_state_dict(checkpoint['state_dict'])
-        model = model.to(device)
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        global_step = checkpoint['global_step']
+        if not [f for f in os.listdir(args.save) if 'checkpoint' in f]:
+            print(f'No checkpoint found in directory: {args.save}')
+            print('Begin training from scratch...')
+            global_step, init_epoch = 0, 1
+        else:
+            checkpoint_name = sorted([f for f in os.listdir(args.save) if 'checkpoint' in f])[-1]
+            checkpoint_file = os.path.join(args.save, checkpoint_name)
+            print(f'loading checkpoint: {checkpoint_file}')
+            checkpoint = torch.load(checkpoint_file, map_location='cpu')
+            init_epoch = checkpoint['epoch'] + 1
+            model.load_state_dict(checkpoint['state_dict'])
+            model = model.to(device)
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            global_step = checkpoint['global_step']
     else:
+        print('Begin training from scratch...')
         global_step, init_epoch = 0, 1
 
     for epoch in range(init_epoch, args.epochs + 1):
