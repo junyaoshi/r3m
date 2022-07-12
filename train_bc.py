@@ -119,10 +119,7 @@ def main(args):
     print(f'Predicting hand bbox: {args.predict_hand_bbox}.')
     print(f'Predicting hand pose: {args.predict_hand_pose}.')
     print(f'Predicting hand shape: {args.predict_hand_shape}.')
-    if torch.cuda.is_available():
-        device = "cuda"
-    else:
-        device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f'Device: {device}.')
     task_names = CV_TASKS if args.run_on_cv_server else CLUSTER_TASKS
     writer = SummaryWriter(log_dir=args.save, flush_secs=60)
@@ -339,7 +336,9 @@ def train(
             r3m_embedding, task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
-            future_img_shape, future_joint_depth,
+            current_img_shape, future_img_shape,
+            current_joint_depth, future_joint_depth,
+            current_wrist_depth_real, future_wrist_depth_real,
             current_hand_pose, future_hand_pose,
             current_hand_shape, future_hand_shape,
             current_hand_pose_path, future_hand_pose_path
@@ -533,7 +532,9 @@ def test(
             r3m_embedding, task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
-            future_img_shape, future_joint_depth,
+            current_img_shape, future_img_shape,
+            current_joint_depth, future_joint_depth,
+            current_wrist_depth_real, future_wrist_depth_real,
             current_hand_pose, future_hand_pose,
             current_hand_shape, future_hand_shape,
             current_hand_pose_path, future_hand_pose_path

@@ -4,53 +4,66 @@ import json
 from PIL import Image
 from tqdm import tqdm
 import pickle
+import argparse
 
 import torch
 import torchvision.transforms as T
 
 from r3m import load_r3m
 
-DATA_HOME_DIR = '/scratch/junyao/Datasets/something_something_processed'
-SPLITS = ['train', 'valid']
-TASK_NAMES = ['pull_left', 'pull_right', 'push_right']
+def parse_args():
+    """
+    Parse input arguments
+    """
+    parser = argparse.ArgumentParser(description='Save r3m embeddings for images')
+    parser.add_argument('--input_dir', type=str,
+                        help='directory to data (parent directory of "frames" and "IoU_xx.json")',
+                        default='/home/junyao/Datasets/something_something_hand_demos')
+    parser.add_argument('--iou_thresh', dest='iou_thresh', type=float, required=True,
+                        help='threshold for filtering data with hand and mesh bbox IoU',
+                        default=0.7)
+    args = parser.parse_args()
+    return args
 
-if torch.cuda.is_available():
-    device = "cuda"
-else:
-    device = "cpu"
 
-r3m = load_r3m("resnet50") # resnet18, resnet34
-r3m.eval()
-r3m.to(device)
+def main(args):
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
 
-## DEFINE PREPROCESSING
-transforms = T.Compose([T.Resize((224, 224)), T.ToTensor()]) # ToTensor() divides by 255
+    r3m = load_r3m("resnet50") # resnet18, resnet34
+    r3m.eval()
+    r3m.to(device)
 
-for task_name in TASK_NAMES:
-    task_data_dir = join(DATA_HOME_DIR, task_name)
-    for split in SPLITS:
-        split_data_dir = join(task_data_dir, split)
-        print(f'Saving R3M embeddings for data at f{split_data_dir}')
-        json_path = join(split_data_dir, 'IoU_0.7.json')
-        with open(json_path, 'r') as f:
-            json_dict = json.load(f)
+    ## DEFINE PREPROCESSING
+    transforms = T.Compose([T.Resize((224, 224)), T.ToTensor()]) # ToTensor() divides by 255
 
-        frames_dir = join(split_data_dir, 'frames')
-        r3m_dir = join(split_data_dir, 'r3m')
-        for vid_num in tqdm(
-            json_dict,
-            desc='Going through videos in this split...'
-        ):
-            frames_vid_dir = join(frames_dir, vid_num)
-            r3m_vid_dir = join(r3m_dir, vid_num)
-            os.makedirs(r3m_vid_dir, exist_ok=True)
-            for frame_num in json_dict[vid_num]:
-                frame_img_path = join(frames_vid_dir, f'frame{frame_num}.jpg')
-                image = Image.open(frame_img_path)
-                preprocessed_image = transforms(image).reshape(-1, 3, 224, 224)
-                preprocessed_image.to(device)
-                with torch.no_grad():
-                    frame_r3m = r3m(preprocessed_image * 255.0)  ## R3M expects image input to be [0-255]
-                frame_r3m_path = join(r3m_vid_dir, f'frame{frame_num}_r3m.pkl')
-                with open(frame_r3m_path, 'wb') as f:
-                    pickle.dump(frame_r3m, f)
+    print(f'Saving R3M embeddings for data at f{args.input_dir}')
+    json_path = join(args.input_dir, f'IoU_{args.iou_thresh}.json')
+    with open(json_path, 'r') as f:
+        json_dict = json.load(f)
+
+    frames_dir = join(args.input_dir, 'frames')
+    r3m_dir = join(args.input_dir, 'r3m')
+    for vid_num in tqdm(
+        json_dict,
+        desc=f'Going through {len(json_dict)} videos...'
+    ):
+        frames_vid_dir = join(frames_dir, vid_num)
+        r3m_vid_dir = join(r3m_dir, vid_num)
+        os.makedirs(r3m_vid_dir, exist_ok=True)
+        for frame_num in json_dict[vid_num]:
+            frame_img_path = join(frames_vid_dir, f'frame{frame_num}.jpg')
+            image = Image.open(frame_img_path)
+            preprocessed_image = transforms(image).reshape(-1, 3, 224, 224)
+            preprocessed_image.to(device)
+            with torch.no_grad():
+                frame_r3m = r3m(preprocessed_image * 255.0)  ## R3M expects image input to be [0-255]
+            frame_r3m_path = join(r3m_vid_dir, f'frame{frame_num}_r3m.pkl')
+            with open(frame_r3m_path, 'wb') as f:
+                pickle.dump(frame_r3m, f)
+
+if __name__ == '__main__':
+    args = parse_args()
+    main(args)

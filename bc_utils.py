@@ -158,13 +158,28 @@ def _convert_bbox_to_oriIm(data_z, img_shape, hand_bbox, final_size=224):
     return data_z
 
 
+def load_img_from_hand_info(hand_info, robot_demos, run_on_cv_server):
+    img_path = hand_info['image_path']
+    if img_path[:8] == '/scratch' and run_on_cv_server:
+        img_path = '/home' + img_path[8:]
+
+    if robot_demos:
+        # replace frames with robot_frames
+        img_path = join(*list(map(lambda x: x.replace('frames', 'robot_frames'), img_path.split('/'))))
+    return cv2.imread(img_path)
+
+
 def generate_single_visualization(
         current_hand_pose_path, future_hand_pose_path,
         future_cam, hand,
         pred_hand_bbox, pred_hand_pose, pred_hand_shape,
         task_names, task,
         visualizer, hand_mocap,
-        use_visualizer, run_on_cv_server, original_task=False
+        use_visualizer, run_on_cv_server,
+        current_img=None, future_img=None,
+        original_task=False, robot_demos=False,
+        log_depth=False,
+        current_depth=None, future_depth=None, pred_depth=None
 ):
     from ss_utils.filter_utils import extract_pred_mesh_list
     from renderer.image_utils import draw_hand_bbox
@@ -185,12 +200,6 @@ def generate_single_visualization(
         mesh_list = extract_pred_mesh_list(hand_info)
         return hand_bbox_list, mesh_list
 
-    def load_img_from_hand_info(hand_info):
-        img_path = hand_info['image_path']
-        if img_path[:8] == '/scratch' and run_on_cv_server:
-            img_path = '/home' + img_path[8:]
-        return cv2.imread(img_path)
-
     with open(current_hand_pose_path, 'rb') as f:
         current_hand_info = pickle.load(f)
     with open(future_hand_pose_path, 'rb') as f:
@@ -199,7 +208,8 @@ def generate_single_visualization(
     current_hand_bbox_list, current_mesh_list = extract_hand_bbox_and_mesh_list(
         current_hand_info, hand
     )
-    current_img = load_img_from_hand_info(current_hand_info)
+    if current_img is None:
+        current_img = load_img_from_hand_info(current_hand_info, robot_demos, run_on_cv_server)
     current_rendered_img = render_bbox_and_hand_pose(
         current_img, current_hand_bbox_list, current_mesh_list
     )
@@ -207,7 +217,8 @@ def generate_single_visualization(
     future_hand_bbox_list, future_mesh_list = extract_hand_bbox_and_mesh_list(
         future_hand_info, hand
     )
-    future_img = load_img_from_hand_info(future_hand_info)
+    if future_img is None:
+        future_img = load_img_from_hand_info(future_hand_info, robot_demos, run_on_cv_server)
     future_rendered_img = render_bbox_and_hand_pose(
         future_img, future_hand_bbox_list, future_mesh_list
     )
@@ -259,13 +270,25 @@ def generate_single_visualization(
     )
 
     vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img, future_rendered_img])
-    white = np.zeros((50, vis_img_bgr.shape[1], 3), np.uint8)
+    if log_depth:
+        assert current_depth is not None and future_depth is not None and pred_depth is not None
+        white = np.zeros((200, vis_img_bgr.shape[1], 3), np.uint8)
+    else:
+        white = np.zeros((50, vis_img_bgr.shape[1], 3), np.uint8)
     white[:] = (255, 255, 255)
     vis_img_bgr = cv2.vconcat((white, vis_img_bgr))
     font = cv2.FONT_HERSHEY_COMPLEX
     task_name = task_names[np.argmax(task)]
-    desc_str = "Original Task" if original_task else "Task"
-    cv2.putText(vis_img_bgr, f'{desc_str}: {task_name}', (30, 40), font, 0.6, (0, 0, 0), 2, 0)
+    task_str = "Original Task" if original_task else "Task"
+    task_desc_str = f'{task_str}: {task_name}'
+    cv2.putText(vis_img_bgr, task_desc_str, (30, 40), font, 0.6, (0, 0, 0), 2, 0)
+    if log_depth:
+        current_depth_str = f'Current Depth: {current_depth:.4f}'
+        cv2.putText(vis_img_bgr, current_depth_str, (30, 90), font, 0.6, (0, 0, 0), 2, 0)
+        pred_depth_str = f'Predicted Depth: {pred_depth:.4f}'
+        cv2.putText(vis_img_bgr, pred_depth_str, (30, 190), font, 0.6, (0, 0, 0), 2, 0)
+        future_depth_str = f'Future Depth: {future_depth:.4f}'
+        cv2.putText(vis_img_bgr, future_depth_str, (30, 140), font, 0.6, (0, 0, 0), 2, 0)
 
     vis_img = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
     return vis_img.astype(np.uint8)
@@ -313,190 +336,213 @@ class AvgrageMeter(object):
 
 
 if __name__ == '__main__':
-    # # test path conversion
-    # mocap_path = '/home/junyao/Datasets/something_something_processed/' \
-    #              'push_left_right/train/mocap_output/0/mocap/frame10_prediction_result.pkl'
-    # rendered_path = mocap_path_to_rendered_path(mocap_path)
-    # print(rendered_path)
+    test_path_conversion = False
+    test_visualization = True
+    test_pose_to_joint_z = False
 
-    # # test bbox normalization
-    # future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
-    #                         'push_left_right/valid/mocap_output/108375/mocap/frame31_prediction_result.pkl'
-    # hand= 'left_hand'
-    # with open(future_hand_pose_path, 'rb') as f:
-    #     future_hand_info = pickle.load(f)
-    # img_path = future_hand_info['image_path']
-    # if img_path[:8] == '/scratch':
-    #     img_path = '/home' + img_path[8:]
-    # img = cv2.imread(img_path)
-    # future_hand_bbox = future_hand_info['hand_bbox_list'][0][hand]
-    # img_size = (img.shape[1], img.shape[0])
-    # norm_future_hand_bbox = normalize_bbox(future_hand_bbox, img_size)
-    # unnorm_future_hand_bbox = unnormalize_bbox(norm_future_hand_bbox, img_size)
-    # print(f'Original bbox: {future_hand_bbox}')
-    # print(f'Normalized bbox: {norm_future_hand_bbox}')
-    # print(f'Unnormalized bbox: {unnorm_future_hand_bbox}')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_visualizer = True
 
-    # # test visualization
-    # use_visualizer = True
-    # frankmocap_path = '/home/junyao/LfHV/frankmocap'
-    # r3m_path = '/home/junyao/LfHV/r3m'
-    # sys.path.insert(1, frankmocap_path)
-    # os.chdir(frankmocap_path)
-    # from handmocap.hand_mocap_api import HandMocap
-    #
-    # if use_visualizer:
-    #     print('Loading opengl visualizer.')
-    #     from renderer.visualizer import Visualizer
-    #
-    #     visualizer = Visualizer('opengl')
-    # else:
-    #     visualizer = None
-    # print('Loading frank mocap hand module.')
-    # checkpoint_hand = join(
-    #     frankmocap_path,
-    #     'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
-    # )
-    # smpl_dir = join(frankmocap_path, 'extra_data/smpl')
-    # hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
-    # os.chdir(r3m_path)
-    #
-    # current_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
-    #                          'push_left_right/valid/mocap_output/80757/mocap/frame24_prediction_result.pkl'
-    # future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
-    #                         'push_left_right/valid/mocap_output/80757/mocap/frame29_prediction_result.pkl'
-    # hand = 'right_hand'
-    #
-    # print('Preprocessing hand data from pkl.')
-    # with open(future_hand_pose_path, 'rb') as f:
-    #     future_hand_info = pickle.load(f)
-    # future_image_path = future_hand_info['image_path']
-    # if future_image_path[:8] == '/scratch':
-    #     future_image_path = '/home' + future_image_path[8:]
-    # future_image = cv2.imread(future_image_path)
-    # future_hand_pose = future_hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
-    # future_hand_bbox = normalize_bbox(
-    #     future_hand_info['hand_bbox_list'][0][hand],
-    #     (future_image.shape[1], future_image.shape[0])
-    # )
-    # future_camera = future_hand_info['pred_output_list'][0][hand]['pred_camera']
-    #
-    # task_names = [
-    #     'move_away',
-    #     'move_towards',
-    #     'move_down',
-    #     'move_up',
-    #     'pull_left',
-    #     'pull_right',
-    #     'push_left',
-    #     'push_right',
-    #     'push_slightly',
-    #     'push_left_right'
-    # ]
-    # task = np.zeros(len(task_names))
-    # task[-1] = 1
-    #
-    # print('Begin visualization.')
-    # vis_img = generate_single_visualization(
-    #     current_hand_pose_path=current_hand_pose_path,
-    #     future_hand_pose_path=future_hand_pose_path,
-    #     future_cam=future_camera,
-    #     hand=hand,
-    #     pred_hand_bbox=future_hand_bbox,
-    #     pred_hand_pose=future_hand_pose,
-    #     task_names=task_names,
-    #     task=task,
-    #     visualizer=visualizer,
-    #     hand_mocap=hand_mocap,
-    #     use_visualizer=use_visualizer,
-    #     device='cuda',
-    #     run_on_cv_server=True
-    # )
-    #
-    # plt.figure()
-    # plt.imshow(vis_img)
-    # plt.savefig('vis_img.png')
-    # # plt.show()
-    # plt.close()
+    if test_path_conversion:
+        # test path conversion
+        mocap_path = '/home/junyao/Datasets/something_something_processed/' \
+                     'push_left_right/train/mocap_output/0/mocap/frame10_prediction_result.pkl'
+        rendered_path = mocap_path_to_rendered_path(mocap_path)
+        print(rendered_path)
 
-    # test pose to joint z
-    run_on_cv_server = True
-    frankmocap_path = '/home/junyao/LfHV/frankmocap'
-    r3m_path = '/home/junyao/LfHV/r3m'
-    sys.path.insert(1, frankmocap_path)
-    os.chdir(frankmocap_path)
-    device = 'cuda'
-    from handmocap.hand_mocap_api import HandMocap
+        # test bbox normalization
+        future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
+                                'push_left_right/valid/mocap_output/108375/mocap/frame31_prediction_result.pkl'
+        hand= 'left_hand'
+        with open(future_hand_pose_path, 'rb') as f:
+            future_hand_info = pickle.load(f)
+        img_path = future_hand_info['image_path']
+        if img_path[:8] == '/scratch':
+            img_path = '/home' + img_path[8:]
+        img = cv2.imread(img_path)
+        future_hand_bbox = future_hand_info['hand_bbox_list'][0][hand]
+        img_size = (img.shape[1], img.shape[0])
+        norm_future_hand_bbox = normalize_bbox(future_hand_bbox, img_size)
+        unnorm_future_hand_bbox = unnormalize_bbox(norm_future_hand_bbox, img_size)
+        print(f'Original bbox: {future_hand_bbox}')
+        print(f'Normalized bbox: {norm_future_hand_bbox}')
+        print(f'Unnormalized bbox: {unnorm_future_hand_bbox}')
 
-    print('Loading frank mocap hand module.')
-    checkpoint_hand = join(
-        frankmocap_path,
-        'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
-    )
-    smpl_dir = join(frankmocap_path, 'extra_data/smpl')
-    hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device=device, batch_size=2)
-    os.chdir(r3m_path)
+    if test_visualization:
+        # test visualization
+        frankmocap_path = '/home/junyao/LfHV/frankmocap'
+        r3m_path = '/home/junyao/LfHV/r3m'
+        sys.path.insert(1, frankmocap_path)
+        os.chdir(frankmocap_path)
+        from handmocap.hand_mocap_api import HandMocap
 
-    current_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
-                             'push_left_right/valid/mocap_output/80757/mocap/frame24_prediction_result.pkl'
-    future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
-                            'push_left_right/valid/mocap_output/80757/mocap/frame29_prediction_result.pkl'
+        if use_visualizer:
+            print('Loading opengl visualizer.')
+            from renderer.visualizer import Visualizer
 
-    hand = ['right_hand', 'right_hand']
-    pose_path = [current_hand_pose_path, future_hand_pose_path]
+            visualizer = Visualizer('opengl')
+        else:
+            visualizer = None
+        print('Loading frank mocap hand module.')
+        checkpoint_hand = join(
+            frankmocap_path,
+            'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
+        )
+        smpl_dir = join(frankmocap_path, 'extra_data/smpl')
+        hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
+        os.chdir(r3m_path)
 
-    print('Preprocessing hand data from pkl.')
-    with open(current_hand_pose_path, 'rb') as f:
-        current_hand_info = pickle.load(f)
-    with open(future_hand_pose_path, 'rb') as f:
-        future_hand_info = pickle.load(f)
+        current_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos/' \
+                                 'pull_left/mocap_output/2/mocap/frame30_prediction_result.pkl'
+        future_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos/' \
+                                'pull_left/mocap_output/2/mocap/frame50_prediction_result.pkl'
+        hand = 'left_hand'
 
-    current_hand_pose = current_hand_info['pred_output_list'][0]['right_hand']['pred_hand_pose']
-    future_hand_pose = future_hand_info['pred_output_list'][0]['right_hand']['pred_hand_pose']
-    pose = np.vstack([current_hand_pose, future_hand_pose])
-    pose = torch.Tensor(pose).to(device)
+        print('Preprocessing hand data from pkl.')
+        with open(future_hand_pose_path, 'rb') as f:
+            future_hand_info = pickle.load(f)
+        future_image_path = future_hand_info['image_path']
+        if future_image_path[:8] == '/scratch':
+            future_image_path = '/home' + future_image_path[8:]
+        future_image = cv2.imread(future_image_path)
+        future_hand_pose = future_hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
+        future_hand_bbox = normalize_bbox(
+            future_hand_info['hand_bbox_list'][0][hand],
+            (future_image.shape[1], future_image.shape[0])
+        )
+        future_camera = future_hand_info['pred_output_list'][0][hand]['pred_camera']
+        future_joint_depth = future_hand_info['pred_output_list'][0][hand]['pred_joints_img'][:, 2]
+        future_hand_shape = future_hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
 
-    current_hand_shape = current_hand_info['pred_output_list'][0]['right_hand']['pred_hand_betas']
-    future_hand_shape = future_hand_info['pred_output_list'][0]['right_hand']['pred_hand_betas']
-    shape = np.vstack([current_hand_shape, future_hand_shape])
-    shape = torch.Tensor(shape).to(device)
+        task_names = [
+            'move_away',
+            'move_towards',
+            'move_down',
+            'move_up',
+            'pull_left',
+            'pull_right',
+            'push_left',
+            'push_right',
+            'push_slightly',
+            'push_left_right'
+        ]
+        task = np.zeros(len(task_names))
+        task[-1] = 1
 
-    current_cam = current_hand_info['pred_output_list'][0]['right_hand']['pred_camera']
-    future_cam = future_hand_info['pred_output_list'][0]['right_hand']['pred_camera']
-    cam = np.vstack([current_cam, future_cam])
-    cam = torch.Tensor(cam).to(device)
+        print('Begin visualization.')
+        vis_img = generate_single_visualization(
+            current_hand_pose_path=current_hand_pose_path,
+            future_hand_pose_path=future_hand_pose_path,
+            future_cam=future_camera,
+            hand=hand,
+            pred_hand_bbox=torch.from_numpy(future_hand_bbox).to(device),
+            pred_hand_pose=torch.from_numpy(future_hand_pose).to(device),
+            pred_hand_shape=torch.from_numpy(future_hand_shape).to(device),
+            task_names=task_names,
+            task=task,
+            visualizer=visualizer,
+            hand_mocap=hand_mocap,
+            use_visualizer=use_visualizer,
+            run_on_cv_server=True,
+            log_depth=True,
+            current_depth=1,
+            future_depth=future_joint_depth.mean(),
+            pred_depth=1
+        )
 
-    current_hand_bbox = current_hand_info['hand_bbox_list'][0]['right_hand']
-    current_image_path = current_hand_info['image_path']
-    if current_image_path[:8] == '/scratch' and run_on_cv_server:
-        current_image_path = '/home' + current_image_path[8:]
-    current_image = cv2.imread(current_image_path)
-    current_hand_bbox = normalize_bbox(current_hand_bbox, (current_image.shape[1], current_image.shape[0]))
-    current_img_shape = current_image.shape
-    future_hand_bbox = future_hand_info['hand_bbox_list'][0]['right_hand']
-    future_image_path = future_hand_info['image_path']
-    if future_image_path[:8] == '/scratch' and run_on_cv_server:
-        future_image_path = '/home' + future_image_path[8:]
-    future_image = cv2.imread(future_image_path)
-    future_hand_bbox = normalize_bbox(future_hand_bbox, (future_image.shape[1], future_image.shape[0]))
-    future_img_shape = future_image.shape
-    hand_bbox = np.vstack([current_hand_bbox, future_hand_bbox])
-    hand_bbox = torch.Tensor(hand_bbox).to(device)
-    img_shape = np.vstack([current_img_shape, future_img_shape])
-    img_shape = torch.Tensor(img_shape).to(device).round().int()
+        plt_path = 'vis_img.png'
+        plt.figure()
+        plt.imshow(vis_img)
+        plt.savefig('vis_img.png')
+        # plt.show()
+        plt.close()
+        print(f'Saved visualization image to {plt_path}.')
 
-    joint_z = pose_to_joint_depth(
-        hand_mocap, hand, pose, hand_bbox, cam, img_shape, device,
-        shape=None, shape_path=pose_path
-    )
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir='tb_vis_test')
+        writer.add_scalar('loss', 3, 1)
+        writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')
+        print(f'Saved tensorboard visualization image to tb_vis_test.')
 
-    gt_current_joint_z = current_hand_info['pred_output_list'][0]['right_hand']['pred_joints_img'][:, 2]
-    gt_future_joint_z = future_hand_info['pred_output_list'][0]['right_hand']['pred_joints_img'][:, 2]
-    gt_joint_z = np.vstack([gt_current_joint_z, gt_future_joint_z])
-    gt_joint_z = torch.Tensor(gt_joint_z).to(device)
+    if test_pose_to_joint_z:
+        # test pose to joint z
+        run_on_cv_server = True
+        frankmocap_path = '/home/junyao/LfHV/frankmocap'
+        r3m_path = '/home/junyao/LfHV/r3m'
+        sys.path.insert(1, frankmocap_path)
+        os.chdir(frankmocap_path)
+        device = 'cuda'
+        from handmocap.hand_mocap_api import HandMocap
 
-    print(f'joint_z: \n{joint_z}')
-    print(f'gt_joint_z: \n{gt_joint_z}')
+        print('Loading frank mocap hand module.')
+        checkpoint_hand = join(
+            frankmocap_path,
+            'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
+        )
+        smpl_dir = join(frankmocap_path, 'extra_data/smpl')
+        hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device=device, batch_size=2)
+        os.chdir(r3m_path)
+
+        current_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
+                                 'push_left_right/valid/mocap_output/80757/mocap/frame24_prediction_result.pkl'
+        future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/' \
+                                'push_left_right/valid/mocap_output/80757/mocap/frame29_prediction_result.pkl'
+
+        hand = ['right_hand', 'right_hand']
+        pose_path = [current_hand_pose_path, future_hand_pose_path]
+
+        print('Preprocessing hand data from pkl.')
+        with open(current_hand_pose_path, 'rb') as f:
+            current_hand_info = pickle.load(f)
+        with open(future_hand_pose_path, 'rb') as f:
+            future_hand_info = pickle.load(f)
+
+        current_hand_pose = current_hand_info['pred_output_list'][0]['right_hand']['pred_hand_pose']
+        future_hand_pose = future_hand_info['pred_output_list'][0]['right_hand']['pred_hand_pose']
+        pose = np.vstack([current_hand_pose, future_hand_pose])
+        pose = torch.Tensor(pose).to(device)
+
+        current_hand_shape = current_hand_info['pred_output_list'][0]['right_hand']['pred_hand_betas']
+        future_hand_shape = future_hand_info['pred_output_list'][0]['right_hand']['pred_hand_betas']
+        shape = np.vstack([current_hand_shape, future_hand_shape])
+        shape = torch.Tensor(shape).to(device)
+
+        current_cam = current_hand_info['pred_output_list'][0]['right_hand']['pred_camera']
+        future_cam = future_hand_info['pred_output_list'][0]['right_hand']['pred_camera']
+        cam = np.vstack([current_cam, future_cam])
+        cam = torch.Tensor(cam).to(device)
+
+        current_hand_bbox = current_hand_info['hand_bbox_list'][0]['right_hand']
+        current_image_path = current_hand_info['image_path']
+        if current_image_path[:8] == '/scratch' and run_on_cv_server:
+            current_image_path = '/home' + current_image_path[8:]
+        current_image = cv2.imread(current_image_path)
+        current_hand_bbox = normalize_bbox(current_hand_bbox, (current_image.shape[1], current_image.shape[0]))
+        current_img_shape = current_image.shape
+        future_hand_bbox = future_hand_info['hand_bbox_list'][0]['right_hand']
+        future_image_path = future_hand_info['image_path']
+        if future_image_path[:8] == '/scratch' and run_on_cv_server:
+            future_image_path = '/home' + future_image_path[8:]
+        future_image = cv2.imread(future_image_path)
+        future_hand_bbox = normalize_bbox(future_hand_bbox, (future_image.shape[1], future_image.shape[0]))
+        future_img_shape = future_image.shape
+        hand_bbox = np.vstack([current_hand_bbox, future_hand_bbox])
+        hand_bbox = torch.Tensor(hand_bbox).to(device)
+        img_shape = np.vstack([current_img_shape, future_img_shape])
+        img_shape = torch.Tensor(img_shape).to(device).round().int()
+
+        joint_z = pose_to_joint_depth(
+            hand_mocap, hand, pose, hand_bbox, cam, img_shape, device,
+            shape=None, shape_path=pose_path
+        )
+
+        gt_current_joint_z = current_hand_info['pred_output_list'][0]['right_hand']['pred_joints_img'][:, 2]
+        gt_future_joint_z = future_hand_info['pred_output_list'][0]['right_hand']['pred_joints_img'][:, 2]
+        gt_joint_z = np.vstack([gt_current_joint_z, gt_future_joint_z])
+        gt_joint_z = torch.Tensor(gt_joint_z).to(device)
+
+        print(f'joint_z: \n{joint_z}')
+        print(f'gt_joint_z: \n{gt_joint_z}')
 
 
 
