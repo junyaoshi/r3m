@@ -2,3 +2,4 @@ outputs/
 __pycache__/
 .nfs*
 .idea
+.DS_Store
