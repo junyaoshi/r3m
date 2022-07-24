@@ -333,7 +333,8 @@ def train(
 
     for step, data in tqdm(enumerate(train_queue), desc='Going through train data...'):
         (
-            r3m_embedding, task, hand,
+            hand_r3m_embedding, _,
+            task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
             current_img_shape, future_img_shape,
@@ -344,7 +345,7 @@ def train(
             current_hand_pose_path, future_hand_pose_path
         ) = data
         input = torch.cat((
-            r3m_embedding, task,
+            hand_r3m_embedding, task,
             current_hand_bbox, current_hand_pose, current_hand_shape,
             current_camera, future_camera
         ), dim=1).to(device).float()
@@ -457,7 +458,7 @@ def train(
                 all_task_instances = torch.vstack(all_task_instances)
 
                 task_conditioned_input = torch.cat((
-                    r3m_embedding[i].repeat(len(task_names), 1).to(device),
+                    hand_r3m_embedding[i].repeat(len(task_names), 1).to(device),
                     all_task_instances.to(device),
                     current_hand_bbox[i].repeat(len(task_names), 1),
                     current_hand_pose[i].repeat(len(task_names), 1),
@@ -529,7 +530,8 @@ def test(
 
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):
         (
-            r3m_embedding, task, hand,
+            hand_r3m_embedding, _,
+            task, hand,
             current_hand_bbox, future_hand_bbox,
             current_camera, future_camera,
             current_img_shape, future_img_shape,
@@ -540,7 +542,7 @@ def test(
             current_hand_pose_path, future_hand_pose_path
         ) = data
         input = torch.cat((
-            r3m_embedding, task,
+            hand_r3m_embedding, task,
             current_hand_bbox, current_hand_pose, current_hand_shape,
             current_camera, future_camera
         ), dim=1).to(device).float()
@@ -634,7 +636,7 @@ def test(
         all_task_instances = torch.vstack(all_task_instances)
 
         task_conditioned_input = torch.cat((
-            r3m_embedding[i].repeat(len(task_names), 1).to(device),
+            hand_r3m_embedding[i].repeat(len(task_names), 1).to(device),
             all_task_instances.to(device),
             current_hand_bbox[i].repeat(len(task_names), 1),
             current_hand_pose[i].repeat(len(task_names), 1),
