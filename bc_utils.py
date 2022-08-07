@@ -1,12 +1,18 @@
-import numpy as np
+import json
 import pickle
 import sys
 from os.path import join
+import os
+from copy import deepcopy
+from pprint import pprint
+
+import numpy as np
+import matplotlib.pyplot as plt
 import cv2
 import torch
-import os
-import matplotlib.pyplot as plt
-from copy import deepcopy
+
+from resnet import EndtoEndNet, TransferableNet
+
 
 CV_TASKS = [
     'push_left',
@@ -184,11 +190,13 @@ def generate_single_visualization(
         hand_mocap,
         use_visualizer,
         run_on_cv_server,
+        current_hand_info=None,
         current_img=None,
         future_img=None,
         original_task=False,
         robot_demos=False,
         log_depth=False,
+        log_metric=False,
         current_depth=None,
         future_depth=None,
         pred_depth=None
@@ -212,8 +220,10 @@ def generate_single_visualization(
         mesh_list = extract_pred_mesh_list(hand_info)
         return hand_bbox_list, mesh_list
 
-    with open(current_hand_pose_path, 'rb') as f:
-        current_hand_info = pickle.load(f)
+    if current_hand_info is None:
+        assert current_hand_pose_path is not None
+        with open(current_hand_pose_path, 'rb') as f:
+            current_hand_info = pickle.load(f)
     current_hand_bbox_list, current_mesh_list = extract_hand_bbox_and_mesh_list(
         current_hand_info, hand
     )
@@ -288,26 +298,47 @@ def generate_single_visualization(
         )
         vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img, future_rendered_img])
 
+    white_y = 50
+    next_line = 40
     if log_depth:
-        assert current_depth is not None and future_depth is not None and pred_depth is not None
-        white = np.zeros((200, vis_img_bgr.shape[1], 3), np.uint8)
-    else:
-        white = np.zeros((50, vis_img_bgr.shape[1], 3), np.uint8)
+        assert current_depth is not None and pred_depth is not None
+        if no_future_info:
+            white_y += 100
+        else:
+            assert future_depth is not None
+            white_y += 150
+    if log_metric:
+        white_y += 50
+    white = np.zeros((white_y, vis_img_bgr.shape[1], 3), np.uint8)
     white[:] = (255, 255, 255)
     vis_img_bgr = cv2.vconcat((white, vis_img_bgr))
     font = cv2.FONT_HERSHEY_COMPLEX
     task_name = task_names[np.argmax(task)]
     task_str = "Original Task" if original_task else "Task"
     task_desc_str = f'{task_str}: {task_name}'
-    cv2.putText(vis_img_bgr, task_desc_str, (30, 40), font, 0.6, (0, 0, 0), 2, 0)
+    cv2.putText(vis_img_bgr, task_desc_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
+    next_line += 50
     if log_depth:
         current_depth_str = f'Current Depth: {current_depth:.4f}'
-        cv2.putText(vis_img_bgr, current_depth_str, (30, 90), font, 0.6, (0, 0, 0), 2, 0)
+        cv2.putText(vis_img_bgr, current_depth_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
+        next_line += 50
         pred_depth_str = f'Predicted Depth: {pred_depth:.4f}'
-        cv2.putText(vis_img_bgr, pred_depth_str, (30, 140), font, 0.6, (0, 0, 0), 2, 0)
+        cv2.putText(vis_img_bgr, pred_depth_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
+        next_line += 50
         if not no_future_info:
             future_depth_str = f'Future Depth: {future_depth:.4f}'
             cv2.putText(vis_img_bgr, future_depth_str, (30, 190), font, 0.6, (0, 0, 0), 2, 0)
+            next_line += 50
+    if log_metric:
+        passed_metric = evaluate_metric(
+            task_name=task_name,
+            current_bbox=current_hand_bbox_list[0][hand],
+            pred_bbox=pred_hand_bbox,
+            current_depth=current_depth,
+            pred_depth=pred_depth
+        )
+        metric_str = f'Passed metric: {passed_metric}'
+        cv2.putText(vis_img_bgr, metric_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
 
     vis_img = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
     return vis_img.astype(np.uint8)
@@ -338,8 +369,140 @@ def pose_to_joint_depth(
     return joints_imgcoord_z
 
 
-class AvgrageMeter(object):
+def process_mocap_pred(mocap_pred_path, hand, mocap_pred=None, depth_descriptor='scaling_factor'):
+    assert mocap_pred_path is not None or mocap_pred is not None
+    if mocap_pred is None:
+        with open(mocap_pred_path, 'rb') as f:
+            mocap_pred = pickle.load(f)
+    hand_info = mocap_pred
 
+    hand_pose = hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
+    unnormalized_hand_bbox = hand_info['hand_bbox_list'][0][hand]
+    camera = hand_info['pred_output_list'][0][hand]['pred_camera']
+    img_shape = hand_info['image_shape']
+    hand_bbox = normalize_bbox(unnormalized_hand_bbox, (img_shape[1], img_shape[0]))
+    hand_shape = hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
+    wrist_3d = hand_info['pred_output_list'][0][hand]['pred_joints_img'][0]
+    wrist_depth_real = -999
+
+    hand_depth_estimate = None
+    if depth_descriptor == 'wrist_img_z':
+        hand_depth_estimate = wrist_3d[2]
+    elif depth_descriptor == 'bbox_size':
+        *_, w, h = unnormalized_hand_bbox
+        bbox_size = w * h
+        hand_depth_estimate = 1. / bbox_size
+    elif depth_descriptor == 'scaling_factor':
+        cam_scale = camera[0]
+        hand_boxScale_o2n = hand_info['pred_output_list'][0][hand]['bbox_scale_ratio']
+        scaling_factor = cam_scale / hand_boxScale_o2n
+        hand_depth_estimate = 1. / scaling_factor
+    elif depth_descriptor == 'normalized_bbox_size':
+        *_, w, h = hand_bbox
+        normalized_bbox_size = w * h
+        hand_depth_estimate = 1. / normalized_bbox_size
+
+    return (
+        hand_bbox,
+        camera,
+        img_shape,
+        hand_depth_estimate,
+        wrist_depth_real,
+        hand_pose,
+        hand_shape
+    )
+
+
+def load_eval_bc_model_and_args(eval_args, device):
+    print('loading the model at:')
+    print(eval_args.checkpoint)
+    checkpoint = torch.load(eval_args.checkpoint, map_location='cpu')
+    args = checkpoint['args']
+    pprint(f'loaded train args: \n{args}')
+
+    # compute dimensions
+    r3m_dim, task_dim, cam_dim = 2048, len(CV_TASKS) if args.run_on_cv_server else len(CLUSTER_TASKS), 3
+    args.hand_bbox_dim, args.hand_pose_dim, args.hand_shape_dim = 4, 48, 10
+    hand_dim = sum([args.hand_bbox_dim, args.hand_pose_dim, args.hand_shape_dim])
+    input_dim = sum([r3m_dim, task_dim, hand_dim, cam_dim, cam_dim])
+    output_dim = hand_dim
+
+    # load model
+    model, model_init_func, residual = None, None, None
+    if args.model_type == 'e2e':
+        model_init_func = EndtoEndNet
+    elif args.model_type == 'transfer':
+        model_init_func = TransferableNet
+    if args.net_type == 'mlp':
+        residual = False
+    elif args.net_type == 'residual':
+        residual = True
+    model = model_init_func(
+        in_features=input_dim,
+        out_features=output_dim,
+        dims=(r3m_dim, task_dim, hand_dim),
+        n_blocks=args.n_blocks,
+        residual=residual
+    ).to(device).float()
+    model.load_state_dict(checkpoint['state_dict'])
+    model.eval()
+    print(f'Loaded model type: {args.model_type}, blocks: {args.n_blocks}, network: {args.net_type}')
+    print(f'param size = {count_parameters_in_M(model)}M')
+
+    return model, args
+
+
+def estimate_depth(eval_args, args, hand_bbox):
+    pred_hand_depth_estimate = None
+    if eval_args.depth_descriptor == 'wrist_img_z':
+        raise NotImplementedError
+    elif eval_args.depth_descriptor == 'bbox_size':
+        raise NotImplementedError
+    elif eval_args.depth_descriptor == 'scaling_factor':
+        raise NotImplementedError
+    elif eval_args.depth_descriptor == 'normalized_bbox_size':
+        assert args.predict_hand_bbox
+        # *_, w, h = pred_hand_bbox[0].cpu().detach().numpy()
+        *_, w, h = hand_bbox
+        pred_normalized_bbox_size = w * h
+        pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
+
+    return pred_hand_depth_estimate
+
+
+def evaluate_metric(task_name, current_bbox=None, pred_bbox=None, current_depth=None, pred_depth=None):
+    """Returns a boolean flag: whether it passes the eval metric"""
+    if task_name in ['move_away', 'move_towards']:
+        assert current_depth is not None and pred_depth is not None
+        if task_name == 'move_away':
+            return pred_depth > current_depth
+        elif task_name == 'move_towards':
+            return pred_depth < current_depth
+    elif task_name in [
+        'move_down', 'move_up',
+        'pull_left', 'pull_right',
+        'push_left', 'push_right',
+        'push_slightly'
+    ]:
+        assert current_bbox is not None and pred_bbox is not None
+        current_xyxy, future_xyxy = xywh_to_xyxy(current_bbox), xywh_to_xyxy(pred_bbox)
+        c_x1, c_y1, c_x2, c_y2 = current_xyxy
+        f_x1, f_y1, f_x2, f_y2 = future_xyxy
+        if task_name == 'move_down':
+            return np.mean([f_y1 - c_y1, f_y2 - c_y2]) > 0
+        elif task_name == 'move_up':
+            return np.mean([f_y1 - c_y1, f_y2 - c_y2]) < 0
+        elif task_name == 'pull_left' or task_name == 'push_left':
+            return np.mean([f_x1 - c_x1, f_x2 - c_x2]) < 0
+        elif task_name == 'pull_right' or task_name == 'push_right':
+            return np.mean([f_x1 - c_x1, f_x2 - c_x2]) > 0
+        elif task_name == 'push_slightly':
+            return np.mean([f_x1 - c_x1, f_x2 - c_x2, f_y1 - c_y1, f_y2 - c_y2]) < 30
+    else:
+        raise ValueError(f'Encountered unknown task name [{task_name}] during metric evaluation.')
+
+
+class AvgrageMeter(object):
     def __init__(self):
         self.reset()
 
@@ -358,11 +521,12 @@ if __name__ == '__main__':
     test_path_conversion = False
     test_visualization = False
     test_pose_to_joint_z = False
-    test_robot_visualization = True
+    test_robot_visualization = False
+    test_metric = True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_visualizer = True
-    no_future_info = False
+    no_future_info = True
     log_tb = False
 
     if test_path_conversion:
@@ -414,10 +578,10 @@ if __name__ == '__main__':
         hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
         os.chdir(r3m_path)
 
-        current_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos_same_hand/' \
-                                 'move_up/mocap_output/1/mocap/frame0_prediction_result.pkl'
-        future_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos_same_hand/' \
-                                'move_up/mocap_output/1/mocap/frame1_prediction_result.pkl'
+        current_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos/' \
+                                 'move_down/mocap_output/1/mocap/frame10_prediction_result.pkl'
+        future_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos/' \
+                                'move_down/mocap_output/1/mocap/frame20_prediction_result.pkl'
         hand = 'left_hand'
 
         print('Preprocessing hand data from pkl.')
@@ -446,10 +610,9 @@ if __name__ == '__main__':
             'push_left',
             'push_right',
             'push_slightly',
-            'push_left_right'
         ]
         task = np.zeros(len(task_names))
-        task[-1] = 1
+        task[2] = 1
 
         print('Begin visualization.')
         vis_img = generate_single_visualization(
@@ -467,6 +630,7 @@ if __name__ == '__main__':
             use_visualizer=use_visualizer,
             run_on_cv_server=True,
             log_depth=True,
+            log_metric=True,
             current_depth=1,
             future_depth=future_joint_depth.mean(),
             pred_depth=1
@@ -664,3 +828,22 @@ if __name__ == '__main__':
             writer.add_scalar('loss', 3, 1)
             writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')
             print(f'Saved tensorboard visualization image to tb_vis_test.')
+
+    if test_metric:
+        dataset_dir = '/home/junyao/Datasets/something_something_hand_demos'
+        task = 'move_away'
+        vid_num = '1'
+        hand = 'left_hand'
+
+        current_bbox_json = join(dataset_dir, task, 'bbs_json', vid_num, 'frame10.json')
+        current_bbox_dict = json.load(open(current_bbox_json))
+        current_bbox = current_bbox_dict['hand_bbox_list'][0][hand]
+
+        future_bbox_json = join(dataset_dir, task, 'bbs_json', vid_num, 'frame20.json')
+        future_bbox_dict = json.load(open(future_bbox_json))
+        future_bbox = future_bbox_dict['hand_bbox_list'][0][hand]
+
+        passed_metric = evaluate_metric(task_name=task, current_bbox=current_bbox, pred_bbox=future_bbox)
+        print(f'Passed metric? {passed_metric}.')
+
+    pass

@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from datasets import (
+from dataset import (
     SomethingSomethingR3M,
     SomethingSomethingDemosR3M
 )
@@ -62,6 +62,8 @@ def parse_args():
     parser.add_argument('--use_current_frame_info', action='store_true',
                         help='if true, use current frame info (pose, bbox, or shape) instead of future frame '
                              'for visualization if the model is not trained to predict certain info')
+    parser.add_argument('--no_shuffle', action='store_true',
+                        help='if true, dataloader is not shuffled')
 
     # paths
     parser.add_argument('--checkpoint', type=str, required=True,
@@ -192,9 +194,15 @@ def main(eval_args):
     print(f'Loaded data. Time: {end - start:.3f} seconds')
     print(f'There are {len(data)} data.')
     queue = torch.utils.data.DataLoader(
-        data, batch_size=1, shuffle=True,
+        data, batch_size=1, shuffle=False if eval_args.no_shuffle else True,
         num_workers=0, drop_last=True
     )
+    eval_r3m_queue = None
+    if eval_args.eval_r3m:
+        eval_r3m_queue = torch.utils.data.DataLoader(
+            data, batch_size=1, shuffle=True,
+            num_workers=0, drop_last=True
+        )
     print('Creating data loader: done')
 
     current_hand_depth_estimates = []
@@ -320,6 +328,7 @@ def main(eval_args):
                 future_hand_depth_estimates.append(future_hand_depth_estimate.item())
                 future_wrist_depths_real.append(future_wrist_depth_real.item())
 
+        task_name = eval_task_names[torch.argmax(original_task.squeeze())]
         vis_img = generate_single_visualization(
             current_hand_pose_path=current_hand_pose_path[0],
             future_hand_pose_path=None if eval_args.no_future_info else future_hand_pose_path[0],
@@ -340,7 +349,7 @@ def main(eval_args):
             future_depth=future_hand_depth_estimate.item() if eval_args.log_depth else None,
             pred_depth=pred_hand_depth_estimate if eval_args.log_depth else None
         )
-        writer.add_image(f'vis_images', vis_img, step, dataformats='HWC')
+        writer.add_image(f'vis_images_{task_name}/{step}', vis_img, dataformats='HWC')
 
         # evaluate robot and human image conditioning together
         if eval_args.robot_demos:
@@ -381,13 +390,13 @@ def main(eval_args):
             )
             vis_imgs.append(hand_vis_img)
             final_vis_img = np.hstack(vis_imgs)
-            writer.add_image(f'vis_hand_robot', final_vis_img, step, dataformats='HWC')
+            writer.add_image(f'vis_hand_robot/{step}', final_vis_img, dataformats='HWC')
 
         if eval_args.eval_r3m:
             vis_imgs = []
             for k in range(eval_args.eval_r3m_samples):
                 if k != 0:
-                    data = next(iter(queue))
+                    data = next(iter(eval_r3m_queue))
                 (
                     new_hand_r3m_embedding, new_robot_r3m_embedding,
                     *_,
@@ -435,7 +444,7 @@ def main(eval_args):
                 vis_imgs.append(new_vis_img)
 
             final_vis_img = np.hstack(vis_imgs)
-            writer.add_image(f'vis_r3m', final_vis_img, step, dataformats='HWC')
+            writer.add_image(f'vis_r3m/{step}', final_vis_img, dataformats='HWC')
 
         # visualize model output conditioning on different task inputs
         if eval_args.eval_tasks:
@@ -483,7 +492,7 @@ def main(eval_args):
                 )
                 vis_imgs.append(vis_img)
             final_vis_img = np.hstack(vis_imgs)
-            writer.add_image(f'vis_tasks', final_vis_img, step, dataformats='HWC')
+            writer.add_image(f'vis_tasks/{step}', final_vis_img, dataformats='HWC')
 
 
         if step + 1 == eval_args.n_eval_samples:

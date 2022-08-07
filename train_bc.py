@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from datasets import SomethingSomethingR3M
+from dataset import SomethingSomethingR3M
 from bc_utils import (
     count_parameters_in_M, AvgrageMeter, generate_single_visualization, pose_to_joint_depth,
     CV_TASKS, CLUSTER_TASKS

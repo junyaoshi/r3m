@@ -14,7 +14,7 @@ import multiprocessing as mp
 import torch
 from torch.utils.data import Dataset
 
-from bc_utils import determine_which_hand, normalize_bbox, CLUSTER_TASKS
+from bc_utils import determine_which_hand, normalize_bbox, process_mocap_pred, CLUSTER_TASKS
 
 class SomethingSomethingR3M(Dataset):
     def __init__(self, task_names, data_home_dir,
@@ -137,42 +137,11 @@ class SomethingSomethingR3M(Dataset):
         return len(self.r3m_paths)
 
     def _extract_hand_info(self, hand_pose_path, hand):
-        with open(hand_pose_path, 'rb') as f:
-            hand_info = pickle.load(f)
-        hand_pose = hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
-        unnormalized_hand_bbox = hand_info['hand_bbox_list'][0][hand]
-        camera = hand_info['pred_output_list'][0][hand]['pred_camera']
-        img_shape = hand_info['image_shape']
-        hand_bbox = normalize_bbox(unnormalized_hand_bbox, (img_shape[1], img_shape[0]))
-        hand_shape = hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
-        wrist_3d = hand_info['pred_output_list'][0][hand]['pred_joints_img'][0]
-        wrist_depth_real = -999
-
-        hand_depth_estimate = None
-        if self.depth_descriptor == 'wrist_img_z':
-            hand_depth_estimate = wrist_3d[2]
-        elif self.depth_descriptor == 'bbox_size':
-            *_, w, h = unnormalized_hand_bbox
-            bbox_size = w * h
-            hand_depth_estimate = 1. / bbox_size
-        elif self.depth_descriptor == 'scaling_factor':
-            cam_scale = camera[0]
-            hand_boxScale_o2n = hand_info['pred_output_list'][0][hand]['bbox_scale_ratio']
-            scaling_factor = cam_scale / hand_boxScale_o2n
-            hand_depth_estimate = 1. / scaling_factor
-        elif self.depth_descriptor == 'normalized_bbox_size':
-            *_, w, h = hand_bbox
-            normalized_bbox_size = w * h
-            hand_depth_estimate = 1. / normalized_bbox_size
-
-        return (
-            hand_bbox,
-            camera,
-            img_shape,
-            hand_depth_estimate,
-            wrist_depth_real,
-            hand_pose,
-            hand_shape
+        return process_mocap_pred(
+            mocap_pred_path=hand_pose_path,
+            hand=hand,
+            mocap_pred=None,
+            depth_descriptor=self.depth_descriptor
         )
 
     def __getitem__(self, idx):
@@ -303,7 +272,8 @@ class SomethingSomethingDemosR3M(Dataset):
                 r3m_vid_dir = join(r3m_dir, vid_num)
                 mocap_vid_dir = join(split_dir, 'mocap_output', vid_num, 'mocap')
                 depths_vid_dir = join(depths_dir, vid_num)
-                for current_frame_num in json_dict[vid_num]:
+                frame_nums = sorted(json_dict[vid_num], key=int)
+                for current_frame_num in frame_nums:
                     # check if future frame exists
                     future_frame_num = str(int(current_frame_num) + self.time_interval)
                     if future_frame_num not in json_dict[vid_num] and self.demo_type != 'same_hand':
