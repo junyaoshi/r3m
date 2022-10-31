@@ -70,6 +70,9 @@ class EndtoEndNet(nn.Module):
         """Architecture for learning end-to-end Behavorial Cloning
         Input -> ResNet -> Action
 
+        Also the architecture for learning end-to-end fully transferable network
+        Can handle both human and robot input
+
         set n_res_blocks=0 to get r3m_bc architecture
         """
         super().__init__()
@@ -99,14 +102,14 @@ class EndtoEndNet(nn.Module):
         return z
 
 
-class TransferableNet(nn.Module):
+class PartiallyTransferableNet(nn.Module):
     def __init__(
             self,
             in_features, out_features, dims, n_blocks,
             residual=True
     ):
         """Architecture for learning transferable representation
-        Learn representation without hand features to allow transferring to robot;
+        Learn part of the representation without hand features to allow transferring to robot;
         Process hand features and the rest with 2 separate streams so that
         the non-hand feature extractor is transferable
         """
@@ -176,7 +179,7 @@ if __name__ == '__main__':
     hand_dim = sum([hand_bbox_dim, hand_pose_dim, hand_shape_dim])
     input_dim = sum([r3m_dim, task_dim, hand_dim, cam_dim, cam_dim])
     output_dim = hand_dim
-    resnet = TransferableNet(
+    resnet = PartiallyTransferableNet(
         in_features=input_dim,
         out_features=output_dim,
         dims=(r3m_dim, task_dim, hand_dim),

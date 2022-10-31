@@ -3,6 +3,7 @@ import pickle
 import sys
 from os.path import join
 import os
+import os.path as osp
 from copy import deepcopy
 from pprint import pprint
 
@@ -11,7 +12,7 @@ import matplotlib.pyplot as plt
 import cv2
 import torch
 
-from resnet import EndtoEndNet, TransferableNet
+from resnet import EndtoEndNet, PartiallyTransferableNet
 
 
 CV_TASKS = [
@@ -199,7 +200,9 @@ def generate_single_visualization(
         log_metric=False,
         current_depth=None,
         future_depth=None,
-        pred_depth=None
+        pred_depth=None,
+        pre_interaction=False,
+        object_label=None
 ):
     from ss_utils.filter_utils import extract_pred_mesh_list
     from renderer.image_utils import draw_hand_bbox
@@ -232,6 +235,9 @@ def generate_single_visualization(
     current_rendered_img = render_bbox_and_hand_pose(
         visualizer, current_img, current_hand_bbox_list, current_mesh_list, use_visualizer
     )
+
+    if pre_interaction:
+        assert object_label is not None
 
     img_h, img_w, _ = current_img.shape
     pred_hand_bbox = unnormalize_bbox(pred_hand_bbox.detach().cpu().numpy(), (img_w, img_h))
@@ -280,7 +286,7 @@ def generate_single_visualization(
             visualizer, current_img,
             pred_hand_bbox_list, pred_mesh_list, use_visualizer
         )
-        vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img])
+        vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img]).astype(np.uint8)
     else:
         with open(future_hand_pose_path, 'rb') as f:
             future_hand_info = pickle.load(f)
@@ -296,7 +302,7 @@ def generate_single_visualization(
             visualizer, future_img,
             pred_hand_bbox_list, pred_mesh_list, use_visualizer
         )
-        vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img, future_rendered_img])
+        vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img, future_rendered_img]).astype(np.uint8)
 
     white_y = 50
     next_line = 40
@@ -329,6 +335,7 @@ def generate_single_visualization(
             future_depth_str = f'Future Depth: {future_depth:.4f}'
             cv2.putText(vis_img_bgr, future_depth_str, (30, 190), font, 0.6, (0, 0, 0), 2, 0)
             next_line += 50
+    passed_metric = None
     if log_metric:
         passed_metric = evaluate_metric(
             task_name=task_name,
@@ -341,7 +348,13 @@ def generate_single_visualization(
         cv2.putText(vis_img_bgr, metric_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
 
     vis_img = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
-    return vis_img.astype(np.uint8)
+    return vis_img.astype(np.uint8), passed_metric
+
+
+def generate_transferable_visualization():
+    from ss_utils.filter_utils import extract_pred_mesh_list
+    from renderer.image_utils import draw_hand_bbox
+    from mocap_utils.coordconv import convert_smpl_to_bbox, convert_bbox_to_oriIm
 
 
 def pose_to_joint_depth(
@@ -413,6 +426,67 @@ def process_mocap_pred(mocap_pred_path, hand, mocap_pred=None, depth_descriptor=
     )
 
 
+def process_transferable_mocap_pred(
+        mocap_pred_path, hand, mocap_pred=None,
+        depth_descriptor='scaling_factor', depth_norm_params_path=''
+):
+    assert mocap_pred_path is not None or mocap_pred is not None
+    if mocap_pred is None:
+        with open(mocap_pred_path, 'rb') as f:
+            mocap_pred = pickle.load(f)
+    hand_info = mocap_pred
+
+    assert osp.exists(depth_norm_params_path),  "Depth normalization file {depth_norm_params_path} doesn't exist"
+    with open(depth_norm_params_path, 'rb') as f:
+        depth_norm_params = pickle.load(f)
+    depth_scale = depth_norm_params[depth_descriptor]['scale']
+
+    hand_pose = hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
+    unnormalized_hand_bbox = hand_info['hand_bbox_list'][0][hand]
+    camera = hand_info['pred_output_list'][0][hand]['pred_camera']
+    img_shape = hand_info['image_shape']
+    img_x, img_y = img_shape[1], img_shape[0]
+    hand_bbox = normalize_bbox(unnormalized_hand_bbox, (img_x, img_y))
+    hand_shape = hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
+    wrist_3d = hand_info['pred_output_list'][0][hand]['pred_joints_img'][0]
+    contact = hand_info['contact_filtered']
+
+    wrist_coord = wrist_3d[:2]
+    wrist_x_float, wrist_y_float = wrist_coord
+
+    if depth_descriptor == 'wrist_img_z':
+        hand_depth_estimate = wrist_3d[2]
+    elif depth_descriptor == 'bbox_size':
+        *_, w, h = unnormalized_hand_bbox
+        bbox_size = w * h
+        hand_depth_estimate = 1. / bbox_size
+    elif depth_descriptor == 'scaling_factor':
+        cam_scale = camera[0]
+        hand_boxScale_o2n = hand_info['pred_output_list'][0][hand]['bbox_scale_ratio']
+        scaling_factor = cam_scale / hand_boxScale_o2n
+        hand_depth_estimate = 1. / scaling_factor
+    elif depth_descriptor == 'normalized_bbox_size':
+        *_, w, h = hand_bbox
+        normalized_bbox_size = w * h
+        hand_depth_estimate = 1. / normalized_bbox_size
+    else:
+        raise ValueError(f'Invalid depth descriptor: {depth_descriptor}')
+
+    wrist_x_normalized = wrist_x_float / float(img_x)
+    wrist_y_normalized = wrist_y_float / float(img_y)
+    hand_depth_normalized = hand_depth_estimate * depth_scale
+    wrist_rotation = hand_pose[:3]
+
+    return (
+        wrist_x_normalized,
+        wrist_y_normalized,
+        hand_depth_normalized,
+        wrist_rotation,
+        contact,
+        img_shape
+    )
+
+
 def load_eval_bc_model_and_args(eval_args, device):
     print('loading the model at:')
     print(eval_args.checkpoint)
@@ -432,7 +506,7 @@ def load_eval_bc_model_and_args(eval_args, device):
     if args.model_type == 'e2e':
         model_init_func = EndtoEndNet
     elif args.model_type == 'transfer':
-        model_init_func = TransferableNet
+        model_init_func = PartiallyTransferableNet
     if args.net_type == 'mlp':
         residual = False
     elif args.net_type == 'residual':
@@ -470,36 +544,71 @@ def estimate_depth(eval_args, args, hand_bbox):
     return pred_hand_depth_estimate
 
 
-def evaluate_metric(task_name, current_bbox=None, pred_bbox=None, current_depth=None, pred_depth=None):
-    """Returns a boolean flag: whether it passes the eval metric"""
-    if task_name in ['move_away', 'move_towards']:
-        assert current_depth is not None and pred_depth is not None
-        if task_name == 'move_away':
-            return pred_depth > current_depth
-        elif task_name == 'move_towards':
-            return pred_depth < current_depth
-    elif task_name in [
-        'move_down', 'move_up',
-        'pull_left', 'pull_right',
-        'push_left', 'push_right',
-        'push_slightly'
-    ]:
+def evaluate_metric(
+        task_name,
+        current_bbox=None, pred_bbox=None,
+        current_depth=None, pred_depth=None,
+        pre_interaction=False, object_label=None
+):
+    if pre_interaction:
+        raise NotImplementedError
+        assert object_label is not None
         assert current_bbox is not None and pred_bbox is not None
+        assert current_depth is not None and pred_depth is not None
         current_xyxy, future_xyxy = xywh_to_xyxy(current_bbox), xywh_to_xyxy(pred_bbox)
         c_x1, c_y1, c_x2, c_y2 = current_xyxy
         f_x1, f_y1, f_x2, f_y2 = future_xyxy
-        if task_name == 'move_down':
-            return np.mean([f_y1 - c_y1, f_y2 - c_y2]) > 0
-        elif task_name == 'move_up':
-            return np.mean([f_y1 - c_y1, f_y2 - c_y2]) < 0
-        elif task_name == 'pull_left' or task_name == 'push_left':
-            return np.mean([f_x1 - c_x1, f_x2 - c_x2]) < 0
-        elif task_name == 'pull_right' or task_name == 'push_right':
-            return np.mean([f_x1 - c_x1, f_x2 - c_x2]) > 0
-        elif task_name == 'push_slightly':
-            return np.mean([f_x1 - c_x1, f_x2 - c_x2, f_y1 - c_y1, f_y2 - c_y2]) < 30
+        c_xc, c_yc = (c_x2 + c_x1) / 2, (c_y2 + c_y1) / 2  # current xy center
+        f_xc, f_yc = (f_x2 + f_x1) / 2, (f_y2 + f_y1) / 2  # future xy center
+        c_center = np.array([c_xc, c_yc])
+        f_center = np.array([f_xc, f_yc])
+        lr_movement = np.mean([f_x1 - c_x1, f_x2 - c_x2])
+        tb_movement = np.mean([f_y1 - c_y1, f_y2 - c_y2])
+        at_movement = pred_depth - current_depth
+        lr, tb, at = object_label
+        if lr == 0:  # left_right: same
+            passed_lr = np.abs(f_xc - c_xc) < 20
+        elif lr == 1: # left_right: object is to the left of hand
+            passed_lr = lr_movement < 0
+
     else:
-        raise ValueError(f'Encountered unknown task name [{task_name}] during metric evaluation.')
+        """Returns a boolean flag: whether it passes the eval metric"""
+        if task_name in ['move_away', 'move_towards']:
+            assert current_depth is not None and pred_depth is not None
+            if task_name == 'move_away':
+                return pred_depth > current_depth
+            elif task_name == 'move_towards':
+                return pred_depth < current_depth
+        elif task_name in [
+            'move_down', 'move_up',
+            'pull_left', 'pull_right',
+            'push_left', 'push_right',
+            'push_slightly'
+        ]:
+            assert current_bbox is not None and pred_bbox is not None
+            current_xyxy, future_xyxy = xywh_to_xyxy(current_bbox), xywh_to_xyxy(pred_bbox)
+            c_x1, c_y1, c_x2, c_y2 = current_xyxy
+            f_x1, f_y1, f_x2, f_y2 = future_xyxy
+            c_xc, c_yc = (c_x2 + c_x1) / 2, (c_y2 + c_y1) / 2  # current xy center
+            f_xc, f_yc = (f_x2 + f_x1) / 2, (f_y2 + f_y1) / 2  # future xy center
+            c_center = np.array([c_xc, c_yc])
+            f_center = np.array([f_xc, f_yc])
+            if task_name == 'move_down':
+                return np.mean([f_y1 - c_y1, f_y2 - c_y2]) > 0
+            elif task_name == 'move_up':
+                return np.mean([f_y1 - c_y1, f_y2 - c_y2]) < 0
+            elif task_name == 'pull_left' or task_name == 'push_left':
+                return np.mean([f_x1 - c_x1, f_x2 - c_x2]) < 0
+            elif task_name == 'pull_right' or task_name == 'push_right':
+                return np.mean([f_x1 - c_x1, f_x2 - c_x2]) > 0
+            elif task_name == 'push_slightly':
+                print(f'c_x1, c_y1, c_x2, c_y2: {current_xyxy}')
+                print(f'f_x1, f_y1, f_x2, f_y2: {future_xyxy}')
+                print(f'c_xc: {c_xc}; c_yc: {c_yc}; f_xc: {f_xc}; f_yc: {f_yc}')
+                print(f'fcenter: {f_center}; ccenter: {c_center}; distance: {np.linalg.norm(f_center - c_center)}')
+                return np.linalg.norm(f_center - c_center) < 50 and np.abs(pred_depth - current_depth) < 10
+        else:
+            raise ValueError(f'Encountered unknown task name [{task_name}] during metric evaluation.')
 
 
 class AvgrageMeter(object):
@@ -521,11 +630,11 @@ if __name__ == '__main__':
     test_path_conversion = False
     test_visualization = False
     test_pose_to_joint_z = False
-    test_robot_visualization = False
-    test_metric = True
+    test_robot_visualization = True
+    test_metric = False
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_visualizer = True
+    use_visualizer = False
     no_future_info = True
     log_tb = False
 
@@ -578,10 +687,8 @@ if __name__ == '__main__':
         hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
         os.chdir(r3m_path)
 
-        current_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos/' \
-                                 'move_down/mocap_output/1/mocap/frame10_prediction_result.pkl'
-        future_hand_pose_path = '/home/junyao/Datasets/something_something_hand_demos/' \
-                                'move_down/mocap_output/1/mocap/frame20_prediction_result.pkl'
+        current_hand_pose_path = '/home/junyao/test/mocap/frame10_prediction_result.pkl'
+        future_hand_pose_path = '/home/junyao/test/mocap/frame10_prediction_result.pkl'
         hand = 'left_hand'
 
         print('Preprocessing hand data from pkl.')
