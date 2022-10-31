@@ -13,12 +13,16 @@ from tqdm import tqdm
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from save_r3m_for_ss_frame import setup_r3m, save_r3m
-from bc_utils import (
-    determine_which_hand, process_mocap_pred, cluster_task_to_cv_task,
-    load_eval_bc_model_and_args, generate_single_visualization,
-    estimate_depth, CLUSTER_TASKS
+from utils.save_r3m_for_ss_frame import setup_r3m, save_r3m
+from utils.bc_utils import (
+    determine_which_hand,
+    process_mocap_pred,
+    cluster_task_to_cv_task,
+    load_eval_bc_model_and_args,
+    estimate_depth,
+    CLUSTER_TASKS
 )
+from utils.vis_utils import generate_single_visualization
 
 
 def parse_eval_args():
@@ -74,7 +78,7 @@ def parse_eval_args():
     parser.add_argument('--checkpoint', type=str,
                         default="/home/junyao/LfHV/r3m/checkpoints/transfer/"
                                 "cluster_model=transfer_blocks=4_net=residual_time=20_"
-                                "lr=0.0004_lambdas=[1,5,0]_batch=64_date=06261730/checkpoint_0150.pt",
+                                "lr=0.0004_lambdas=[1,5,0]_batch=64_date=06261730/checkpoint_0300.pt",
                         help='location of the checkpoint to load for evaluation')
     parser.add_argument('--conda_root', dest='conda_root', type=str, default='/home/junyao/anaconda3',
                         help='root directory of conda')
@@ -192,6 +196,7 @@ def main(eval_args):
     robot_frames_save_dir = osp.join(eval_args.data_save_dir, 'robot_frames')
     robot_depths_save_dir = osp.join(eval_args.data_save_dir, 'robot_depths')
     r3m_save_dir = osp.join(eval_args.data_save_dir, 'r3m')
+    robot_r3m_save_dir = osp.join(eval_args.data_save_dir, 'robot_r3m')
     print(f'Begin capturing frames of video {eval_args.video_index}.'
           f'\nStarting frame index: {eval_args.hand_frame_index} for hand; {eval_args.robot_frame_index} for robot.'
           f'\nSaving the frames under {eval_args.data_save_dir}.')
@@ -200,6 +205,12 @@ def main(eval_args):
     hand_frame_index = eval_args.hand_frame_index
     robot_frame_index = eval_args.robot_frame_index
     frames_buffer = []  # format: (video_index, frame_index)
+    metric_stats = {t: {'hand_total': 0, 'hand_success': 0} for t in eval_task_names}
+    if eval_args.collect_paired_data:
+        for t in eval_task_names:
+            metric_stats[t]['robot_total'] = 0
+            metric_stats[t]['robot_success'] = 0
+    step = 0
 
     # Streaming loop
     try:
@@ -295,6 +306,10 @@ def main(eval_args):
                         cuda=cuda,
                         verbose=eval_args.verbose
                     )
+                    robot_image_bgr = None
+                    if eval_args.collect_paired_data:
+                        robot_image_path = osp.join(robot_frames_save_dir, str(v_idx), f'frame{f_idx}.jpg')
+                        robot_image_bgr = cv2.imread(robot_image_path)
 
                     if bbox_success:
                         print('Successfully extracted bounding box. Proceeding with next step.')
@@ -358,7 +373,18 @@ def main(eval_args):
                         device=device,
                         frame_bgr=image_bgr
                     )
-                    r3m_embedding = hand_r3m_embedding
+                    robot_r3m_embedding_path = osp.join(robot_r3m_save_dir, str(v_idx), f'frame{f_idx}_r3m.pkl')
+                    robot_r3m_embedding = None
+                    if eval_args.collect_paired_data:
+                        robot_r3m_embedding = save_r3m(
+                            r3m=r3m,
+                            transforms=transforms,
+                            frame_path=None,
+                            r3m_embedding_path=robot_r3m_embedding_path if eval_args.save_r3m else None,
+                            device=device,
+                            frame_bgr=robot_image_bgr
+                        )
+                    r3m_embedding = robot_r3m_embedding if eval_args.collect_paired_data else hand_r3m_embedding
 
                     # process data for model evaluation
                     t0 = time.time()
@@ -382,6 +408,8 @@ def main(eval_args):
                     # visualize model output conditioning on different task inputs
                     vis_imgs = []
                     for i, task_name in enumerate(eval_task_names):
+                        if task_name == 'push_slightly':
+                            continue
                         task = torch.zeros(1, len(eval_task_names))
                         task[0, i] = 1
                         task_input = task.clone()
@@ -414,7 +442,7 @@ def main(eval_args):
                                 hand_bbox=pred_hand_bbox[0].cpu().detach().numpy()
                             )
 
-                        vis_img = generate_single_visualization(
+                        vis_img, passed_metric = generate_single_visualization(
                             current_hand_pose_path=None,
                             current_hand_info=mocap_pred,
                             future_hand_pose_path=None,
@@ -432,15 +460,111 @@ def main(eval_args):
                             hand_mocap=hand_mocap,
                             use_visualizer=visualizer is not None,
                             run_on_cv_server=False,
-                            current_img=image_bgr,
+                            robot_demos=eval_args.collect_paired_data,
+                            current_img=robot_image_bgr if eval_args.collect_paired_data else image_bgr,
                             log_depth=eval_args.log_depth,
                             log_metric=eval_args.log_metric,
                             current_depth=current_hand_depth_estimate,
                             pred_depth=pred_hand_depth_estimate
                         )
                         vis_imgs.append(vis_img)
+                        if eval_args.log_metric:
+                            metric_stats[task_name][
+                                'robot_total' if eval_args.collect_paired_data else 'hand_total'] += 1
+                            if passed_metric:
+                                metric_stats[task_name][
+                                    'robot_success' if eval_args.collect_paired_data else 'hand_success'] += 1
+
+                        if eval_args.collect_paired_data:
+                            hand_input = torch.cat((
+                                hand_r3m_embedding.cpu(),
+                                task_input,
+                                torch.from_numpy(current_hand_bbox).unsqueeze(0),
+                                torch.from_numpy(current_hand_pose).unsqueeze(0),
+                                torch.from_numpy(current_hand_shape).unsqueeze(0),
+                                torch.from_numpy(current_camera).unsqueeze(0),
+                                torch.from_numpy(future_camera).unsqueeze(0)
+                            ), dim=1).to(device).float()
+
+                            with torch.no_grad():
+                                output = model(hand_input)
+                                pred_hand_bbox = torch.sigmoid(
+                                    output[:, :args.hand_bbox_dim]
+                                )  # force positive values for bbox output
+                                pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+                                pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
+
+                            if eval_args.log_depth:
+                                pred_hand_depth_estimate = estimate_depth(
+                                    eval_args=eval_args,
+                                    args=args,
+                                    hand_bbox=pred_hand_bbox[0].cpu().detach().numpy()
+                                )
+
+                            hand_vis_img, hand_passed_metric = generate_single_visualization(
+                                current_hand_pose_path=None,
+                                current_hand_info=mocap_pred,
+                                future_hand_pose_path=None,
+                                future_cam=future_camera,
+                                hand=hand,
+                                pred_hand_bbox=pred_hand_bbox[0]
+                                if args.predict_hand_bbox else torch.from_numpy(current_hand_bbox).to(device),
+                                pred_hand_pose=pred_hand_pose[0]
+                                if args.predict_hand_pose else torch.from_numpy(current_hand_pose).to(device),
+                                pred_hand_shape=pred_hand_shape[0]
+                                if args.predict_hand_shape else torch.from_numpy(current_hand_shape).to(device),
+                                task_names=eval_task_names,
+                                task=task[0],
+                                visualizer=visualizer,
+                                hand_mocap=hand_mocap,
+                                use_visualizer=visualizer is not None,
+                                run_on_cv_server=False,
+                                robot_demos=False,
+                                current_img=image_bgr,
+                                log_depth=eval_args.log_depth,
+                                log_metric=eval_args.log_metric,
+                                current_depth=current_hand_depth_estimate,
+                                pred_depth=pred_hand_depth_estimate
+                            )
+                            vis_imgs.append(hand_vis_img)
+                            if eval_args.log_metric:
+                                metric_stats[task_name]['hand_total'] += 1
+                                if hand_passed_metric:
+                                    metric_stats[task_name]['hand_success'] += 1
+
                     final_vis_img = np.hstack(vis_imgs)
-                    writer.add_image(f'vis_tasks_vid{v_idx}/frame{f_idx}', final_vis_img, dataformats='HWC')
+                    writer.add_image(f'vis_tasks_vid{v_idx}/frame{f_idx}', final_vis_img, step, dataformats='HWC')
+                    if eval_args.log_metric:
+                        all_tasks_hand_total, all_tasks_hand_success = 0, 0
+                        all_tasks_robot_total, all_tasks_robot_success = 0, 0
+                        for t_name, t_metric in metric_stats.items():
+                            task_hand_total = t_metric['hand_total']
+                            task_hand_success = t_metric['hand_success']
+                            task_hand_success_rate = 0 if task_hand_total == 0 else task_hand_success / task_hand_total
+                            writer.add_scalar(f'{t_name}_metric_stats/hand_total', task_hand_total, step)
+                            writer.add_scalar(f'{t_name}_metric_stats/hand_success', task_hand_success, step)
+                            writer.add_scalar(f'{t_name}_metric_stats/hand_success_rate', task_hand_success_rate, step)
+                            all_tasks_hand_total += task_hand_total
+                            all_tasks_hand_success += task_hand_success
+                            if eval_args.collect_paired_data:
+                                task_robot_total = t_metric['robot_total']
+                                task_robot_success = t_metric['robot_success']
+                                task_robot_success_rate = 0 if task_robot_total == 0 else task_robot_success / task_robot_total
+                                writer.add_scalar(f'{t_name}_metric_stats/robot_total', task_robot_total, step)
+                                writer.add_scalar(f'{t_name}_metric_stats/robot_success', task_robot_success, step)
+                                writer.add_scalar(f'{t_name}_metric_stats/robot_success_rate', task_robot_success_rate, step)
+                                all_tasks_robot_total += task_robot_total
+                                all_tasks_robot_success += task_robot_success
+                        all_tasks_hand_success_rate = 0 if all_tasks_hand_total == 0 else all_tasks_hand_success / all_tasks_hand_total
+                        all_tasks_robot_success_rate = 0 if all_tasks_robot_total == 0 else all_tasks_robot_success / all_tasks_robot_total
+                        writer.add_scalar('overall_metric_stats/hand_total', all_tasks_hand_total, step)
+                        writer.add_scalar('overall_metric_stats/hand_success', all_tasks_hand_success, step)
+                        writer.add_scalar('overall_metric_stats/hand_success_rate', all_tasks_hand_success_rate, step)
+                        if eval_args.collect_paired_data:
+                            writer.add_scalar('overall_metric_stats/robot_total', all_tasks_robot_total, step)
+                            writer.add_scalar('overall_metric_stats/robot_success', all_tasks_robot_success, step)
+                            writer.add_scalar('overall_metric_stats/robot_success_rate', all_tasks_robot_success_rate, step)
+
                     t1 = time.time()
                     print(f'Evaluated video {v_idx} frame {f_idx} for model task conditioning '
                           f'in {t1 - t0:.3f} seconds.')
@@ -449,6 +573,7 @@ def main(eval_args):
                     print(f'\nDone with online model evaluation for video {v_idx} frame {f_idx}. '
                           f'Time elapsed: {end - start:.3f} seconds.')
                     evaluated_frames += 1
+                    step += 1
 
                 print(f'Done with online model evaluation for '
                       f'{evaluated_frames}/{len(frames_buffer)} frames in the buffer.')

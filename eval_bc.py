@@ -1,5 +1,4 @@
 import argparse
-from collections import OrderedDict
 import time
 from os.path import join
 import os
@@ -17,14 +16,17 @@ from dataset import (
     SomethingSomethingR3M,
     SomethingSomethingDemosR3M
 )
-from resnet import EndtoEndNet, TransferableNet
-from bc_utils import (
-    count_parameters_in_M, generate_single_visualization,
-    pose_to_joint_depth, unnormalize_bbox,
+from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
+from utils.bc_utils import (
+    count_parameters_in_M,
+    pose_to_joint_depth,
+    unnormalize_bbox,
     CV_TASKS, CLUSTER_TASKS,
-    cv_task_to_cluster_task, cluster_task_to_cv_task,
-    load_img_from_hand_info
+    cv_task_to_cluster_task,
+    cluster_task_to_cv_task,
+
 )
+from utils.vis_utils import generate_single_visualization, load_img_from_hand_info
 
 def parse_args():
     """
@@ -45,7 +47,14 @@ def parse_args():
                         help='if true, use opengl visualizer to render results and show on tensorboard')
     parser.add_argument('--dataset', type=str, default='ss',
                         help='which dataset to use',
-                        choices=['ss', 'hand_demos', 'robot_demos', 'same_hand_demos'])
+                        choices=['ss', 'hand_demos', 'robot_demos'])
+    parser.add_argument('--iou_thresh', type=float, required=True,
+                        help='threshold for filtering data with hand and mesh bbox IoU',
+                        default=0.7)
+    parser.add_argument('--no_task_labels', action='store_true',
+                        help='set to true if dataset has no task labels')
+    parser.add_argument('--no_future_labels', action='store_true',
+                        help='set to true if dataset has no future labels')
     parser.add_argument('--eval_tasks', action='store_true',
                         help='if true, evaluate conditioning on different tasks')
     parser.add_argument('--eval_r3m', action='store_true',
@@ -59,6 +68,8 @@ def parse_args():
     parser.add_argument('--depth_descriptor', type=str, default='normalized_bbox_size',
                         help='which descriptor to use for hand depth estimation',
                         choices=['wrist_img_z', 'bbox_size', 'scaling_factor', 'normalized_bbox_size'])
+    parser.add_argument('--log_metric', action='store_true',
+                        help='if true, log metric evaluation in visualization')
     parser.add_argument('--use_current_frame_info', action='store_true',
                         help='if true, use current frame info (pose, bbox, or shape) instead of future frame '
                              'for visualization if the model is not trained to predict certain info')
@@ -86,15 +97,16 @@ def parse_args():
     return args
 
 def main(eval_args):
-    demo_datasets = ['hand_demos', 'robot_demos', 'same_hand_demos']
-    eval_args.eval_loss = eval_args.dataset != 'same_hand_demos' # run main eval pass only for other datasets
-    eval_args.no_future_info = eval_args.dataset == 'same_hand_demos'  # this dataset doesn't have future info
+    demo_datasets = ['hand_demos', 'robot_demos']
+    eval_args.eval_loss = not eval_args.no_future_labels # run main eval pass only when there are future labels
     eval_args.robot_demos = eval_args.dataset == 'robot_demos'
     pprint(f'eval args: \n{eval_args}')
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f'Device: {device}.')
     eval_args.save = join(eval_args.root, eval_args.save)
     writer = SummaryWriter(log_dir=eval_args.save, flush_secs=60)
+    for arg in vars(eval_args):
+        writer.add_text(arg, str(getattr(eval_args, arg)))
 
     # visualizer and frank mocap
     print('Loading frankmocap visualizer...')
@@ -137,7 +149,7 @@ def main(eval_args):
     if args.model_type == 'e2e':
         model_init_func = EndtoEndNet
     elif args.model_type == 'transfer':
-        model_init_func = TransferableNet
+        model_init_func = PartiallyTransferableNet
     if args.net_type == 'mlp':
         residual = False
     elif args.net_type == 'residual':
@@ -163,30 +175,25 @@ def main(eval_args):
         print('Using something-something hand demos dataset.')
         data = SomethingSomethingDemosR3M(
             eval_task_names, data_home_dir=eval_args.data_home_dir,
-            time_interval=args.time_interval,
+            iou_thresh=eval_args.iou_thresh, time_interval=1 if eval_args.no_future_labels else args.time_interval,
             debug=args.debug, run_on_cv_server=eval_args.run_on_cv_server,
-            demo_type='hand', depth_descriptor=eval_args.depth_descriptor
+            demo_type='hand', depth_descriptor=eval_args.depth_descriptor,
+            no_task_labels=eval_args.no_task_labels, no_future_labels=eval_args.no_future_labels
         )
-    elif eval_args.dataset == 'robot_demos':
+    elif eval_args.robot_demos:
         print('Using something-something robot demos dataset.')
         data = SomethingSomethingDemosR3M(
             eval_task_names, data_home_dir=eval_args.data_home_dir,
-            time_interval=1,
+            iou_thresh=eval_args.iou_thresh, time_interval=1,
             debug=args.debug, run_on_cv_server=eval_args.run_on_cv_server,
-            demo_type='robot', depth_descriptor=eval_args.depth_descriptor
-        )
-    elif eval_args.dataset == 'same_hand_demos':
-        print('Using something-something same hand demos dataset.')
-        data = SomethingSomethingDemosR3M(
-            eval_task_names, data_home_dir=eval_args.data_home_dir,
-            time_interval=1,
-            debug=args.debug, run_on_cv_server=eval_args.run_on_cv_server,
-            demo_type='same_hand', depth_descriptor=eval_args.depth_descriptor
+            demo_type='robot', depth_descriptor=eval_args.depth_descriptor,
+            no_task_labels=eval_args.no_task_labels, no_future_labels=eval_args.no_future_labels
         )
     else:
         data = SomethingSomethingR3M(
-            eval_task_names, eval_args.data_home_dir,
-            time_interval=args.time_interval, train=True if eval_args.eval_on_train else False,
+            eval_task_names, data_home_dir=eval_args.data_home_dir,
+            iou_thresh=eval_args.iou_thresh, time_interval=args.time_interval,
+            train=True if eval_args.eval_on_train else False,
             debug=args.debug, run_on_cv_server=eval_args.run_on_cv_server,
             num_cpus=eval_args.num_workers, depth_descriptor=eval_args.depth_descriptor
         )
@@ -210,6 +217,14 @@ def main(eval_args):
     future_hand_depth_estimates = []
     future_wrist_depths_real = []
     pred_hand_depth_estimates = []
+    metric_stats = {t: {'total': 0, 'success': 0} for t in eval_task_names}
+    if eval_args.dataset in demo_datasets:
+        metric_stats = {t: {'hand_total': 0, 'hand_success': 0} for t in eval_task_names}
+        if eval_args.robot_demos:
+            for t in eval_task_names:
+                metric_stats[t]['robot_total'] = 0
+                metric_stats[t]['robot_success'] = 0
+
     for step, data in tqdm(enumerate(queue), 'Going through data...'):
         (
             hand_r3m_embedding, robot_r3m_embedding,
@@ -221,22 +236,9 @@ def main(eval_args):
             current_wrist_depth_real, future_wrist_depth_real,
             current_hand_pose, future_hand_pose,
             current_hand_shape, future_hand_shape,
-            current_hand_pose_path, future_hand_pose_path
+            current_hand_pose_path, future_hand_pose_path,
+            object_label
         ) = data
-        i = torch.argmax(original_task.squeeze())
-        original_task_name = eval_task_names[i]
-
-        # visualize model output using original data
-        task = torch.zeros(1, len(eval_task_names))
-        task[0, i] = 1
-        task_input = task.clone()
-        if eval_args.dataset not in demo_datasets:
-            if args.run_on_cv_server and not eval_args.run_on_cv_server:
-                # training on cv evaluating on cluster -> convert cluster task to cv task
-                task_input = cluster_task_to_cv_task(task.squeeze()).unsqueeze(0)
-            if not args.run_on_cv_server and eval_args.run_on_cv_server:
-                # training on cluster evaluating on cv -> convert cv task to cluster task
-                task_input = cv_task_to_cluster_task(task.squeeze()).unsqueeze(0)
 
         current_hand_bbox = current_hand_bbox.to(device).float()
         current_hand_pose = current_hand_pose.to(device)
@@ -245,132 +247,112 @@ def main(eval_args):
         future_hand_pose = future_hand_pose.to(device)
         future_hand_shape = future_hand_shape.to(device)
         r3m_embedding = robot_r3m_embedding if eval_args.robot_demos else hand_r3m_embedding
-        input = torch.cat((
-            r3m_embedding, task_input,
-            current_hand_bbox.cpu(), current_hand_pose.cpu(), current_hand_shape.cpu(),
-            current_camera, future_camera
-        ), dim=1).to(device).float()
-
-        with torch.no_grad():
-            output = model(input)
-            pred_hand_bbox = torch.sigmoid(
-                output[:, :args.hand_bbox_dim]
-            )  # force positive values for bbox output
-            pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
-            pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
-
-            if eval_args.eval_loss:
-                hand_bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
-                hand_pose_loss = l2_loss_func(pred_hand_pose, future_hand_pose)
-                hand_shape_loss = l2_loss_func(pred_hand_shape, future_hand_shape)
-                loss = args.lambda1 * hand_bbox_loss + \
-                       args.lambda2 * hand_pose_loss + \
-                       args.lambda3 * hand_shape_loss
-                bl_hand_bbox_loss = l2_loss_func(current_hand_bbox, future_hand_bbox)
-                bl_hand_pose_loss = l2_loss_func(current_hand_pose, future_hand_pose)
-                bl_hand_shape_loss = l2_loss_func(current_hand_shape, future_hand_shape)
-                bl_loss = args.lambda1 * bl_hand_bbox_loss + \
-                          args.lambda2 * bl_hand_pose_loss + \
-                          args.lambda3 * bl_hand_shape_loss
-
-                writer.add_scalar('loss/overall', loss, step)
-                writer.add_scalar('loss/hand_bbox', hand_bbox_loss, step)
-                writer.add_scalar('loss/hand_pose', hand_pose_loss, step)
-                writer.add_scalar('loss/hand_shape', hand_shape_loss, step)
-                writer.add_scalar('baseline_loss/overall', bl_loss, step)
-                writer.add_scalar('baseline_loss/hand_bbox', bl_hand_bbox_loss, step)
-                writer.add_scalar('baseline_loss/hand_pose', bl_hand_pose_loss, step)
-                writer.add_scalar('baseline_loss/hand_shape', bl_hand_shape_loss, step)
 
         placeholder_pose = current_hand_pose if eval_args.use_current_frame_info else future_hand_pose
         placeholder_bbox = current_hand_bbox if eval_args.use_current_frame_info else future_hand_bbox
         placeholder_shape = current_hand_shape if eval_args.use_current_frame_info else future_hand_shape
 
-        # calculate depth
-        pred_hand_depth_estimate = None
-        if eval_args.log_depth:
-            img_y, img_x = future_img_shape[0]
-            img_y, img_x = img_y.item(), img_x.item()
-            if eval_args.depth_descriptor == 'wrist_img_z':
-                pred_hand_depth_estimate = pose_to_joint_depth(
-                    hand_mocap=hand_mocap_depth,
-                    hand=hand,
-                    pose=pred_hand_pose if args.predict_hand_pose else placeholder_pose,
-                    bbox=pred_hand_bbox if args.predict_hand_bbox else placeholder_bbox,
-                    cam=future_camera.to(device),
-                    img_shape=future_img_shape.to(device),
-                    device=device,
-                    shape=pred_hand_shape if args.predict_hand_shape else placeholder_shape,
-                    shape_path=None
-                )[0].cpu().detach().item()
-            elif eval_args.depth_descriptor == 'bbox_size':
-                assert args.predict_hand_bbox
-                unnormalized_pred_hand_bbox = unnormalize_bbox(
-                    pred_hand_bbox[0].cpu().detach().numpy(),
-                    (img_x, img_y)
-                )
-                *_, w, h = unnormalized_pred_hand_bbox
-                pred_bbox_size = w * h
-                pred_hand_depth_estimate = 1. / pred_bbox_size
-            elif eval_args.depth_descriptor == 'scaling_factor':
-                raise NotImplementedError
-            elif eval_args.depth_descriptor == 'normalized_bbox_size':
-                assert args.predict_hand_bbox
-                *_, w, h = pred_hand_bbox[0].cpu().detach().numpy()
-                pred_normalized_bbox_size = w * h
-                pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
+        original_task_name = None
 
-        if eval_args.log_depth_scatter_plots:
-            current_hand_depth_estimates.append(current_hand_depth_estimate.item())
-            current_wrist_depths_real.append(current_wrist_depth_real.item())
-            pred_hand_depth_estimates.append(pred_hand_depth_estimate)
-            if not eval_args.no_future_info:
-                future_hand_depth_estimates.append(future_hand_depth_estimate.item())
-                future_wrist_depths_real.append(future_wrist_depth_real.item())
+        if not eval_args.no_task_labels:
+            i = torch.argmax(original_task.squeeze())
+            original_task_name = eval_task_names[i]
 
-        task_name = eval_task_names[torch.argmax(original_task.squeeze())]
-        vis_img = generate_single_visualization(
-            current_hand_pose_path=current_hand_pose_path[0],
-            future_hand_pose_path=None if eval_args.no_future_info else future_hand_pose_path[0],
-            future_cam=future_camera[0].cpu().numpy(),
-            hand=hand[0],
-            pred_hand_bbox=pred_hand_bbox[0] if args.predict_hand_bbox else placeholder_bbox[0],
-            pred_hand_pose=pred_hand_pose[0] if args.predict_hand_pose else placeholder_pose[0],
-            pred_hand_shape=pred_hand_shape[0] if args.predict_hand_shape else placeholder_shape[0],
-            task_names=eval_task_names,
-            task=task[0],
-            visualizer=visualizer,
-            hand_mocap=hand_mocap_vis,
-            use_visualizer=eval_args.use_visualizer,
-            run_on_cv_server=eval_args.run_on_cv_server,
-            robot_demos=eval_args.robot_demos,
-            log_depth=eval_args.log_depth,
-            current_depth=current_hand_depth_estimate.item() if eval_args.log_depth else None,
-            future_depth=future_hand_depth_estimate.item() if eval_args.log_depth else None,
-            pred_depth=pred_hand_depth_estimate if eval_args.log_depth else None
-        )
-        writer.add_image(f'vis_images_{task_name}/{step}', vis_img, dataformats='HWC')
+            # visualize model output using original data
+            task = torch.zeros(1, len(eval_task_names))
+            task[0, i] = 1
+            task_input = task.clone()
+            if eval_args.dataset not in demo_datasets:
+                if args.run_on_cv_server and not eval_args.run_on_cv_server:
+                    # training on cv evaluating on cluster -> convert cluster task to cv task
+                    task_input = cluster_task_to_cv_task(task.squeeze()).unsqueeze(0)
+                if not args.run_on_cv_server and eval_args.run_on_cv_server:
+                    # training on cluster evaluating on cv -> convert cv task to cluster task
+                    task_input = cv_task_to_cluster_task(task.squeeze()).unsqueeze(0)
 
-        # evaluate robot and human image conditioning together
-        if eval_args.robot_demos:
-            vis_imgs = [vis_img]  # vis_img with robot r3m as input
-            hand_input = torch.cat((
-                hand_r3m_embedding, task_input,
+            input = torch.cat((
+                r3m_embedding, task_input,
                 current_hand_bbox.cpu(), current_hand_pose.cpu(), current_hand_shape.cpu(),
                 current_camera, future_camera
             ), dim=1).to(device).float()
 
             with torch.no_grad():
-                output = model(hand_input)
+                output = model(input)
                 pred_hand_bbox = torch.sigmoid(
                     output[:, :args.hand_bbox_dim]
                 )  # force positive values for bbox output
                 pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
                 pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
 
-            hand_vis_img = generate_single_visualization(
+                if eval_args.eval_loss:
+                    hand_bbox_loss = l2_loss_func(pred_hand_bbox, future_hand_bbox)
+                    hand_pose_loss = l2_loss_func(pred_hand_pose, future_hand_pose)
+                    hand_shape_loss = l2_loss_func(pred_hand_shape, future_hand_shape)
+                    loss = args.lambda1 * hand_bbox_loss + \
+                           args.lambda2 * hand_pose_loss + \
+                           args.lambda3 * hand_shape_loss
+                    bl_hand_bbox_loss = l2_loss_func(current_hand_bbox, future_hand_bbox)
+                    bl_hand_pose_loss = l2_loss_func(current_hand_pose, future_hand_pose)
+                    bl_hand_shape_loss = l2_loss_func(current_hand_shape, future_hand_shape)
+                    bl_loss = args.lambda1 * bl_hand_bbox_loss + \
+                              args.lambda2 * bl_hand_pose_loss + \
+                              args.lambda3 * bl_hand_shape_loss
+
+                    writer.add_scalar('loss/overall', loss, step)
+                    writer.add_scalar('loss/hand_bbox', hand_bbox_loss, step)
+                    writer.add_scalar('loss/hand_pose', hand_pose_loss, step)
+                    writer.add_scalar('loss/hand_shape', hand_shape_loss, step)
+                    writer.add_scalar('baseline_loss/overall', bl_loss, step)
+                    writer.add_scalar('baseline_loss/hand_bbox', bl_hand_bbox_loss, step)
+                    writer.add_scalar('baseline_loss/hand_pose', bl_hand_pose_loss, step)
+                    writer.add_scalar('baseline_loss/hand_shape', bl_hand_shape_loss, step)
+
+            # calculate depth
+            pred_hand_depth_estimate = None
+            if eval_args.log_depth:
+                img_y, img_x = future_img_shape[0]
+                img_y, img_x = img_y.item(), img_x.item()
+                if eval_args.depth_descriptor == 'wrist_img_z':
+                    pred_hand_depth_estimate = pose_to_joint_depth(
+                        hand_mocap=hand_mocap_depth,
+                        hand=hand,
+                        pose=pred_hand_pose if args.predict_hand_pose else placeholder_pose,
+                        bbox=pred_hand_bbox if args.predict_hand_bbox else placeholder_bbox,
+                        cam=future_camera.to(device),
+                        img_shape=future_img_shape.to(device),
+                        device=device,
+                        shape=pred_hand_shape if args.predict_hand_shape else placeholder_shape,
+                        shape_path=None
+                    )[0].cpu().detach().item()
+                elif eval_args.depth_descriptor == 'bbox_size':
+                    assert args.predict_hand_bbox
+                    unnormalized_pred_hand_bbox = unnormalize_bbox(
+                        pred_hand_bbox[0].cpu().detach().numpy(),
+                        (img_x, img_y)
+                    )
+                    *_, w, h = unnormalized_pred_hand_bbox
+                    pred_bbox_size = w * h
+                    pred_hand_depth_estimate = 1. / pred_bbox_size
+                elif eval_args.depth_descriptor == 'scaling_factor':
+                    raise NotImplementedError
+                elif eval_args.depth_descriptor == 'normalized_bbox_size':
+                    assert args.predict_hand_bbox
+                    *_, w, h = pred_hand_bbox[0].cpu().detach().numpy()
+                    pred_normalized_bbox_size = w * h
+                    pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
+
+            if eval_args.log_depth_scatter_plots:
+                current_hand_depth_estimates.append(current_hand_depth_estimate.item())
+                current_wrist_depths_real.append(current_wrist_depth_real.item())
+                pred_hand_depth_estimates.append(pred_hand_depth_estimate)
+                if not eval_args.no_future_labels:
+                    future_hand_depth_estimates.append(future_hand_depth_estimate.item())
+                    future_wrist_depths_real.append(future_wrist_depth_real.item())
+
+            task_name = eval_task_names[torch.argmax(original_task.squeeze())]
+            vis_img, passed_metric = generate_single_visualization(
                 current_hand_pose_path=current_hand_pose_path[0],
-                future_hand_pose_path=None if eval_args.no_future_info else future_hand_pose_path[0],
+                future_hand_pose_path=None if eval_args.no_future_labels else future_hand_pose_path[0],
                 future_cam=future_camera[0].cpu().numpy(),
                 hand=hand[0],
                 pred_hand_bbox=pred_hand_bbox[0] if args.predict_hand_bbox else placeholder_bbox[0],
@@ -382,50 +364,39 @@ def main(eval_args):
                 hand_mocap=hand_mocap_vis,
                 use_visualizer=eval_args.use_visualizer,
                 run_on_cv_server=eval_args.run_on_cv_server,
-                robot_demos=False,
+                robot_demos=eval_args.robot_demos,
                 log_depth=eval_args.log_depth,
+                log_metric=eval_args.log_metric,
                 current_depth=current_hand_depth_estimate.item() if eval_args.log_depth else None,
                 future_depth=future_hand_depth_estimate.item() if eval_args.log_depth else None,
                 pred_depth=pred_hand_depth_estimate if eval_args.log_depth else None
             )
-            vis_imgs.append(hand_vis_img)
-            final_vis_img = np.hstack(vis_imgs)
-            writer.add_image(f'vis_hand_robot/{step}', final_vis_img, dataformats='HWC')
+            writer.add_image(f'vis_images_{task_name}/{step}', vis_img, dataformats='HWC')
+            if eval_args.log_metric:
+                metric_stats[task_name]['total'] += 1
+                if passed_metric:
+                    metric_stats[task_name]['success'] += 1
 
-        if eval_args.eval_r3m:
-            vis_imgs = []
-            for k in range(eval_args.eval_r3m_samples):
-                if k != 0:
-                    data = next(iter(eval_r3m_queue))
-                (
-                    new_hand_r3m_embedding, new_robot_r3m_embedding,
-                    *_,
-                    new_current_hand_pose_path, new_future_hand_pose_path
-                ) = data
-                new_r3m_embedding = new_robot_r3m_embedding if eval_args.robot_demos else new_hand_r3m_embedding
-                new_input = torch.cat((
-                    new_r3m_embedding, task_input,
+            # evaluate robot and human image conditioning together
+            if eval_args.robot_demos:
+                vis_imgs = [vis_img]  # vis_img with robot r3m as input
+                hand_input = torch.cat((
+                    hand_r3m_embedding, task_input,
                     current_hand_bbox.cpu(), current_hand_pose.cpu(), current_hand_shape.cpu(),
                     current_camera, future_camera
                 ), dim=1).to(device).float()
 
                 with torch.no_grad():
-                    output = model(new_input)
+                    output = model(hand_input)
                     pred_hand_bbox = torch.sigmoid(
                         output[:, :args.hand_bbox_dim]
                     )  # force positive values for bbox output
                     pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
                     pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
 
-                with open(new_current_hand_pose_path[0], 'rb') as f:
-                    new_current_hand_info = pickle.load(f)
-                current_img = load_img_from_hand_info(
-                    new_current_hand_info, eval_args.robot_demos, eval_args.run_on_cv_server
-                )
-
-                new_vis_img = generate_single_visualization(
+                hand_vis_img = generate_single_visualization(
                     current_hand_pose_path=current_hand_pose_path[0],
-                    future_hand_pose_path=None if eval_args.no_future_info else future_hand_pose_path[0],
+                    future_hand_pose_path=None if eval_args.no_future_labels else future_hand_pose_path[0],
                     future_cam=future_camera[0].cpu().numpy(),
                     hand=hand[0],
                     pred_hand_bbox=pred_hand_bbox[0] if args.predict_hand_bbox else placeholder_bbox[0],
@@ -437,19 +408,77 @@ def main(eval_args):
                     hand_mocap=hand_mocap_vis,
                     use_visualizer=eval_args.use_visualizer,
                     run_on_cv_server=eval_args.run_on_cv_server,
-                    robot_demos=eval_args.robot_demos,
-                    current_img=current_img,
-                    future_img=current_img
+                    robot_demos=False,
+                    log_depth=eval_args.log_depth,
+                    current_depth=current_hand_depth_estimate.item() if eval_args.log_depth else None,
+                    future_depth=future_hand_depth_estimate.item() if eval_args.log_depth else None,
+                    pred_depth=pred_hand_depth_estimate if eval_args.log_depth else None
                 )
-                vis_imgs.append(new_vis_img)
+                vis_imgs.append(hand_vis_img)
+                final_vis_img = np.hstack(vis_imgs)
+                writer.add_image(f'vis_hand_robot/{step}', final_vis_img, dataformats='HWC')
 
-            final_vis_img = np.hstack(vis_imgs)
-            writer.add_image(f'vis_r3m/{step}', final_vis_img, dataformats='HWC')
+            if eval_args.eval_r3m:
+                vis_imgs = []
+                for k in range(eval_args.eval_r3m_samples):
+                    if k != 0:
+                        data = next(iter(eval_r3m_queue))
+                    (
+                        new_hand_r3m_embedding, new_robot_r3m_embedding,
+                        *_,
+                        new_current_hand_pose_path, new_future_hand_pose_path,
+                        _
+                    ) = data
+                    new_r3m_embedding = new_robot_r3m_embedding if eval_args.robot_demos else new_hand_r3m_embedding
+                    new_input = torch.cat((
+                        new_r3m_embedding, task_input,
+                        current_hand_bbox.cpu(), current_hand_pose.cpu(), current_hand_shape.cpu(),
+                        current_camera, future_camera
+                    ), dim=1).to(device).float()
+
+                    with torch.no_grad():
+                        output = model(new_input)
+                        pred_hand_bbox = torch.sigmoid(
+                            output[:, :args.hand_bbox_dim]
+                        )  # force positive values for bbox output
+                        pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+                        pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
+
+                    with open(new_current_hand_pose_path[0], 'rb') as f:
+                        new_current_hand_info = pickle.load(f)
+                    current_img = load_img_from_hand_info(
+                        new_current_hand_info, eval_args.robot_demos, eval_args.run_on_cv_server
+                    )
+
+                    new_vis_img = generate_single_visualization(
+                        current_hand_pose_path=current_hand_pose_path[0],
+                        future_hand_pose_path=None if eval_args.no_future_labels else future_hand_pose_path[0],
+                        future_cam=future_camera[0].cpu().numpy(),
+                        hand=hand[0],
+                        pred_hand_bbox=pred_hand_bbox[0] if args.predict_hand_bbox else placeholder_bbox[0],
+                        pred_hand_pose=pred_hand_pose[0] if args.predict_hand_pose else placeholder_pose[0],
+                        pred_hand_shape=pred_hand_shape[0] if args.predict_hand_shape else placeholder_shape[0],
+                        task_names=eval_task_names,
+                        task=task[0],
+                        visualizer=visualizer,
+                        hand_mocap=hand_mocap_vis,
+                        use_visualizer=eval_args.use_visualizer,
+                        run_on_cv_server=eval_args.run_on_cv_server,
+                        robot_demos=eval_args.robot_demos,
+                        current_img=current_img,
+                        future_img=current_img
+                    )
+                    vis_imgs.append(new_vis_img)
+
+                final_vis_img = np.hstack(vis_imgs)
+                writer.add_image(f'vis_r3m/{step}', final_vis_img, dataformats='HWC')
 
         # visualize model output conditioning on different task inputs
         if eval_args.eval_tasks:
             vis_imgs = []
             for i, task_name in enumerate(eval_task_names):
+                if task_name == 'push_slightly':
+                    continue
                 task = torch.zeros(1, len(eval_task_names))
                 task[0, i] = 1
                 task_input = task.clone()
@@ -473,9 +502,47 @@ def main(eval_args):
                     pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
                     pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
 
-                vis_img = generate_single_visualization(
+                pred_hand_depth_estimate = None
+                if eval_args.log_depth:
+                    img_y, img_x = future_img_shape[0]
+                    img_y, img_x = img_y.item(), img_x.item()
+                    if eval_args.depth_descriptor == 'wrist_img_z':
+                        pred_hand_depth_estimate = pose_to_joint_depth(
+                            hand_mocap=hand_mocap_depth,
+                            hand=hand,
+                            pose=pred_hand_pose if args.predict_hand_pose else placeholder_pose,
+                            bbox=pred_hand_bbox if args.predict_hand_bbox else placeholder_bbox,
+                            cam=future_camera.to(device),
+                            img_shape=future_img_shape.to(device),
+                            device=device,
+                            shape=pred_hand_shape if args.predict_hand_shape else placeholder_shape,
+                            shape_path=None
+                        )[0].cpu().detach().item()
+                    elif eval_args.depth_descriptor == 'bbox_size':
+                        assert args.predict_hand_bbox
+                        unnormalized_pred_hand_bbox = unnormalize_bbox(
+                            pred_hand_bbox[0].cpu().detach().numpy(),
+                            (img_x, img_y)
+                        )
+                        *_, w, h = unnormalized_pred_hand_bbox
+                        pred_bbox_size = w * h
+                        pred_hand_depth_estimate = 1. / pred_bbox_size
+                    elif eval_args.depth_descriptor == 'scaling_factor':
+                        raise NotImplementedError
+                    elif eval_args.depth_descriptor == 'normalized_bbox_size':
+                        assert args.predict_hand_bbox
+                        *_, w, h = pred_hand_bbox[0].cpu().detach().numpy()
+                        pred_normalized_bbox_size = w * h
+                        pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
+
+                is_original_task = False
+                if original_task_name is not None:
+                    if task_name == original_task_name:
+                        is_original_task = True
+
+                vis_img, passed_metric = generate_single_visualization(
                     current_hand_pose_path=current_hand_pose_path[0],
-                    future_hand_pose_path=None if eval_args.no_future_info else future_hand_pose_path[0],
+                    future_hand_pose_path=None if eval_args.no_future_labels else future_hand_pose_path[0],
                     future_cam=future_camera[0].cpu().numpy(),
                     hand=hand[0],
                     pred_hand_bbox=pred_hand_bbox[0] if args.predict_hand_bbox else placeholder_bbox[0],
@@ -487,13 +554,128 @@ def main(eval_args):
                     hand_mocap=hand_mocap_vis,
                     use_visualizer=eval_args.use_visualizer,
                     run_on_cv_server=eval_args.run_on_cv_server,
-                    original_task=True if task_name == original_task_name else False,
-                    robot_demos=eval_args.robot_demos
+                    original_task=is_original_task,
+                    robot_demos=eval_args.robot_demos,
+                    log_depth=eval_args.log_depth,
+                    log_metric=eval_args.log_metric,
+                    current_depth=current_hand_depth_estimate.item(),
+                    pred_depth=pred_hand_depth_estimate
                 )
                 vis_imgs.append(vis_img)
+                if eval_args.log_metric:
+                    metric_stats[task_name][
+                        'robot_total' if eval_args.robot_demos else 'hand_total'] += 1
+                    if passed_metric:
+                        metric_stats[task_name][
+                            'robot_success' if eval_args.robot_demos else 'hand_success'] += 1
+
+                if eval_args.robot_demos:
+                    hand_input = torch.cat((
+                        hand_r3m_embedding, task_input,
+                        current_hand_bbox.cpu(), current_hand_pose.cpu(), current_hand_shape.cpu(),
+                        current_camera, future_camera
+                    ), dim=1).to(device).float()
+
+                    with torch.no_grad():
+                        output = model(hand_input)
+                        pred_hand_bbox = torch.sigmoid(
+                            output[:, :args.hand_bbox_dim]
+                        )  # force positive values for bbox output
+                        pred_hand_pose = output[:, args.hand_bbox_dim:(args.hand_bbox_dim + args.hand_pose_dim)]
+                        pred_hand_shape = output[:, (args.hand_bbox_dim + args.hand_pose_dim):]
+
+                    if eval_args.log_depth:
+                        img_y, img_x = future_img_shape[0]
+                        img_y, img_x = img_y.item(), img_x.item()
+                        if eval_args.depth_descriptor == 'wrist_img_z':
+                            pred_hand_depth_estimate = pose_to_joint_depth(
+                                hand_mocap=hand_mocap_depth,
+                                hand=hand,
+                                pose=pred_hand_pose if args.predict_hand_pose else placeholder_pose,
+                                bbox=pred_hand_bbox if args.predict_hand_bbox else placeholder_bbox,
+                                cam=future_camera.to(device),
+                                img_shape=future_img_shape.to(device),
+                                device=device,
+                                shape=pred_hand_shape if args.predict_hand_shape else placeholder_shape,
+                                shape_path=None
+                            )[0].cpu().detach().item()
+                        elif eval_args.depth_descriptor == 'bbox_size':
+                            assert args.predict_hand_bbox
+                            unnormalized_pred_hand_bbox = unnormalize_bbox(
+                                pred_hand_bbox[0].cpu().detach().numpy(),
+                                (img_x, img_y)
+                            )
+                            *_, w, h = unnormalized_pred_hand_bbox
+                            pred_bbox_size = w * h
+                            pred_hand_depth_estimate = 1. / pred_bbox_size
+                        elif eval_args.depth_descriptor == 'scaling_factor':
+                            raise NotImplementedError
+                        elif eval_args.depth_descriptor == 'normalized_bbox_size':
+                            assert args.predict_hand_bbox
+                            *_, w, h = pred_hand_bbox[0].cpu().detach().numpy()
+                            pred_normalized_bbox_size = w * h
+                            pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
+
+                    hand_vis_img, hand_passed_metric = generate_single_visualization(
+                        current_hand_pose_path=current_hand_pose_path[0],
+                        future_hand_pose_path=None if eval_args.no_future_labels else future_hand_pose_path[0],
+                        future_cam=future_camera[0].cpu().numpy(),
+                        hand=hand[0],
+                        pred_hand_bbox=pred_hand_bbox[0] if args.predict_hand_bbox else placeholder_bbox[0],
+                        pred_hand_pose=pred_hand_pose[0] if args.predict_hand_pose else placeholder_pose[0],
+                        pred_hand_shape=pred_hand_shape[0] if args.predict_hand_shape else placeholder_shape[0],
+                        task_names=eval_task_names,
+                        task=task[0],
+                        visualizer=visualizer,
+                        hand_mocap=hand_mocap_vis,
+                        use_visualizer=eval_args.use_visualizer,
+                        run_on_cv_server=eval_args.run_on_cv_server,
+                        original_task=is_original_task,
+                        robot_demos=False,
+                        log_depth=eval_args.log_depth,
+                        log_metric=eval_args.log_metric,
+                        current_depth=current_hand_depth_estimate.item(),
+                        pred_depth=pred_hand_depth_estimate
+                    )
+                    vis_imgs.append(hand_vis_img)
+                    if eval_args.log_metric:
+                        metric_stats[task_name]['hand_total'] += 1
+                        if hand_passed_metric:
+                            metric_stats[task_name]['hand_success'] += 1
+
             final_vis_img = np.hstack(vis_imgs)
             writer.add_image(f'vis_tasks/{step}', final_vis_img, dataformats='HWC')
 
+            if eval_args.log_metric:
+                all_tasks_hand_total, all_tasks_hand_success = 0, 0
+                all_tasks_robot_total, all_tasks_robot_success = 0, 0
+                for t_name, t_metric in metric_stats.items():
+                    task_hand_total = t_metric['hand_total']
+                    task_hand_success = t_metric['hand_success']
+                    task_hand_success_rate = 0 if task_hand_total == 0 else task_hand_success / task_hand_total
+                    writer.add_scalar(f'{t_name}_metric_stats/hand_total', task_hand_total, step)
+                    writer.add_scalar(f'{t_name}_metric_stats/hand_success', task_hand_success, step)
+                    writer.add_scalar(f'{t_name}_metric_stats/hand_success_rate', task_hand_success_rate, step)
+                    all_tasks_hand_total += task_hand_total
+                    all_tasks_hand_success += task_hand_success
+                    if eval_args.robot_demos:
+                        task_robot_total = t_metric['robot_total']
+                        task_robot_success = t_metric['robot_success']
+                        task_robot_success_rate = 0 if task_robot_total == 0 else task_robot_success / task_robot_total
+                        writer.add_scalar(f'{t_name}_metric_stats/robot_total', task_robot_total, step)
+                        writer.add_scalar(f'{t_name}_metric_stats/robot_success', task_robot_success, step)
+                        writer.add_scalar(f'{t_name}_metric_stats/robot_success_rate', task_robot_success_rate, step)
+                        all_tasks_robot_total += task_robot_total
+                        all_tasks_robot_success += task_robot_success
+                all_tasks_hand_success_rate = 0 if all_tasks_hand_total == 0 else all_tasks_hand_success / all_tasks_hand_total
+                all_tasks_robot_success_rate = 0 if all_tasks_robot_total == 0 else all_tasks_robot_success / all_tasks_robot_total
+                writer.add_scalar('overall_metric_stats/hand_total', all_tasks_hand_total, step)
+                writer.add_scalar('overall_metric_stats/hand_success', all_tasks_hand_success, step)
+                writer.add_scalar('overall_metric_stats/hand_success_rate', all_tasks_hand_success_rate, step)
+                if eval_args.robot_demos:
+                    writer.add_scalar('overall_metric_stats/robot_total', all_tasks_robot_total, step)
+                    writer.add_scalar('overall_metric_stats/robot_success', all_tasks_robot_success, step)
+                    writer.add_scalar('overall_metric_stats/robot_success_rate', all_tasks_robot_success_rate, step)
 
         if step + 1 == eval_args.n_eval_samples:
             break
@@ -513,7 +695,7 @@ def main(eval_args):
         writer.add_figure(f'scatter_plots/{title}', fig)
         plt.close(fig)
 
-        if not eval_args.no_future_info:
+        if not eval_args.no_future_labels:
             future_estimates, future_real = [], []
             for estimate, real in zip(future_hand_depth_estimates, future_wrist_depths_real):
                 if real == 0 or real == -999:

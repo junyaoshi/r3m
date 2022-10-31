@@ -1,6 +1,5 @@
 import argparse
 import time
-from collections import OrderedDict
 import os
 from os.path import join
 from tqdm import tqdm
@@ -12,11 +11,15 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import SomethingSomethingR3M
-from bc_utils import (
-    count_parameters_in_M, AvgrageMeter, generate_single_visualization, pose_to_joint_depth,
-    CV_TASKS, CLUSTER_TASKS
+from utils.bc_utils import (
+    count_parameters_in_M,
+    AvgrageMeter,
+    pose_to_joint_depth,
+    CV_TASKS,
+    CLUSTER_TASKS
 )
-from resnet import EndtoEndNet, TransferableNet
+from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
+from utils.vis_utils import generate_single_visualization
 
 SANITY_CHECK_SIZE = 10
 
@@ -86,7 +89,7 @@ def parse_args():
                         help='if true, use opengl visualizer to render results and show on tensorboard')
 
     # paths
-    parser.add_argument('--root', type=str, default='checkpoints',
+    parser.add_argument('--root', type=str, default='/home/junyao/LfHV/r3m/train_bc_checkpoints',
                         help='location of the results')
     parser.add_argument('--save', type=str, default='debug',
                         help='id used for storing intermediate results')
@@ -152,7 +155,7 @@ def main(args):
     if args.model_type == 'e2e':
         model_init_func = EndtoEndNet
     elif args.model_type == 'transfer':
-        model_init_func = TransferableNet
+        model_init_func = PartiallyTransferableNet
     if args.net_type == 'mlp':
         residual = False
     elif args.net_type == 'residual':
