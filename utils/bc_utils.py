@@ -1,18 +1,19 @@
 import json
 import pickle
 import sys
+import time
 from os.path import join
 import os
 import os.path as osp
-from copy import deepcopy
 from pprint import pprint
+from collections import namedtuple
 
 import numpy as np
-import matplotlib.pyplot as plt
 import cv2
 import torch
 
-from resnet import EndtoEndNet, PartiallyTransferableNet
+from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
+from utils.depth_utils import scaling_factor_depth
 
 
 CV_TASKS = [
@@ -166,197 +167,6 @@ def _convert_bbox_to_oriIm(data_z, img_shape, hand_bbox, final_size=224):
     return data_z
 
 
-def load_img_from_hand_info(hand_info, robot_demos, run_on_cv_server):
-    img_path = hand_info['image_path']
-    if img_path[:8] == '/scratch' and run_on_cv_server:
-        img_path = '/home' + img_path[8:]
-
-    if robot_demos:
-        # replace frames with robot_frames
-        img_path = '/' + join(*list(map(lambda x: x.replace('frames', 'robot_frames'), img_path.split('/'))))
-    return cv2.imread(img_path)
-
-
-def generate_single_visualization(
-        current_hand_pose_path,
-        future_hand_pose_path,
-        future_cam,
-        hand,
-        pred_hand_bbox,
-        pred_hand_pose,
-        pred_hand_shape,
-        task_names,
-        task,
-        visualizer,
-        hand_mocap,
-        use_visualizer,
-        run_on_cv_server,
-        current_hand_info=None,
-        current_img=None,
-        future_img=None,
-        original_task=False,
-        robot_demos=False,
-        log_depth=False,
-        log_metric=False,
-        current_depth=None,
-        future_depth=None,
-        pred_depth=None,
-        pre_interaction=False,
-        object_label=None
-):
-    from ss_utils.filter_utils import extract_pred_mesh_list
-    from renderer.image_utils import draw_hand_bbox
-    from mocap_utils.coordconv import convert_smpl_to_bbox, convert_bbox_to_oriIm
-    def render_bbox_and_hand_pose(
-            visualizer, img_original_bgr, hand_bbox_list, mesh_list, use_visualizer
-    ):
-        res_img = img_original_bgr.copy()
-        res_img = draw_hand_bbox(res_img, hand_bbox_list)
-        res_img = visualizer.render_pred_verts(res_img, mesh_list) if use_visualizer else np.zeros_like(res_img)
-        return res_img
-
-    def extract_hand_bbox_and_mesh_list(hand_info, hand):
-        other_hand = 'left_hand' if hand == 'right_hand' else 'right_hand'
-        hand_bbox_list = hand_info['hand_bbox_list']
-        hand_bbox_list[0][other_hand] = None
-        hand_info['pred_output_list'][0][other_hand] = None
-        mesh_list = extract_pred_mesh_list(hand_info)
-        return hand_bbox_list, mesh_list
-
-    if current_hand_info is None:
-        assert current_hand_pose_path is not None
-        with open(current_hand_pose_path, 'rb') as f:
-            current_hand_info = pickle.load(f)
-    current_hand_bbox_list, current_mesh_list = extract_hand_bbox_and_mesh_list(
-        current_hand_info, hand
-    )
-    if current_img is None:
-        current_img = load_img_from_hand_info(current_hand_info, robot_demos, run_on_cv_server)
-    current_rendered_img = render_bbox_and_hand_pose(
-        visualizer, current_img, current_hand_bbox_list, current_mesh_list, use_visualizer
-    )
-
-    if pre_interaction:
-        assert object_label is not None
-
-    img_h, img_w, _ = current_img.shape
-    pred_hand_bbox = unnormalize_bbox(pred_hand_bbox.detach().cpu().numpy(), (img_w, img_h))
-    pred_hand_bbox[2] = min(pred_hand_bbox[2], img_w - pred_hand_bbox[0])
-    pred_hand_bbox[3] = min(pred_hand_bbox[3], img_h - pred_hand_bbox[1])
-    pred_hand_bbox_list = deepcopy(current_hand_bbox_list)
-    pred_hand_bbox_list[0][hand] = pred_hand_bbox
-
-    #  get predicted smpl verts and joints,
-    if hand == 'left_hand':
-        pred_hand_pose[1::3] *= -1
-        pred_hand_pose[2::3] *= -1
-    pred_verts, _ = hand_mocap.model_regressor.get_smplx_output(
-        pred_hand_pose.unsqueeze(0),
-        pred_hand_shape.unsqueeze(0)
-    )
-
-    # Convert vertices into bbox & image space
-    pred_verts_origin = pred_verts.detach().cpu().numpy()[:, hand_mocap.model_regressor.right_hand_verts_idx, :][0]
-    if hand == 'left_hand':
-        pred_verts_origin[:, 0] *= -1
-    cam_scale = future_cam[0]
-    cam_trans = future_cam[1:]
-    vert_smplcoord = pred_verts_origin.copy()
-    vert_bboxcoord = convert_smpl_to_bbox(
-        vert_smplcoord, cam_scale, cam_trans, bAppTransFirst=True
-    )  # SMPL space -> bbox space
-    *_, bbox_scale_ratio, bbox_processed = hand_mocap.process_hand_bbox(
-        current_img, pred_hand_bbox, hand, add_margin=True
-    )
-    bbox_top_left = np.array(bbox_processed[:2])
-    vert_imgcoord = convert_bbox_to_oriIm(
-        vert_bboxcoord, bbox_scale_ratio, bbox_top_left,
-        img_w, img_h
-    )
-    pred_hand_info = deepcopy(current_hand_info)
-    pred_hand_info['pred_output_list'][0][hand]['pred_vertices_img'] = vert_imgcoord
-
-    _, pred_mesh_list = extract_hand_bbox_and_mesh_list(
-        pred_hand_info, hand
-    )
-
-    no_future_info = future_hand_pose_path is None
-    if no_future_info:
-        pred_rendered_img = render_bbox_and_hand_pose(
-            visualizer, current_img,
-            pred_hand_bbox_list, pred_mesh_list, use_visualizer
-        )
-        vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img]).astype(np.uint8)
-    else:
-        with open(future_hand_pose_path, 'rb') as f:
-            future_hand_info = pickle.load(f)
-        future_hand_bbox_list, future_mesh_list = extract_hand_bbox_and_mesh_list(
-            future_hand_info, hand
-        )
-        if future_img is None:
-            future_img = load_img_from_hand_info(future_hand_info, robot_demos, run_on_cv_server)
-        future_rendered_img = render_bbox_and_hand_pose(
-            visualizer, future_img, future_hand_bbox_list, future_mesh_list, use_visualizer
-        )
-        pred_rendered_img = render_bbox_and_hand_pose(
-            visualizer, future_img,
-            pred_hand_bbox_list, pred_mesh_list, use_visualizer
-        )
-        vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img, future_rendered_img]).astype(np.uint8)
-
-    white_y = 50
-    next_line = 40
-    if log_depth:
-        assert current_depth is not None and pred_depth is not None
-        if no_future_info:
-            white_y += 100
-        else:
-            assert future_depth is not None
-            white_y += 150
-    if log_metric:
-        white_y += 50
-    white = np.zeros((white_y, vis_img_bgr.shape[1], 3), np.uint8)
-    white[:] = (255, 255, 255)
-    vis_img_bgr = cv2.vconcat((white, vis_img_bgr))
-    font = cv2.FONT_HERSHEY_COMPLEX
-    task_name = task_names[np.argmax(task)]
-    task_str = "Original Task" if original_task else "Task"
-    task_desc_str = f'{task_str}: {task_name}'
-    cv2.putText(vis_img_bgr, task_desc_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
-    next_line += 50
-    if log_depth:
-        current_depth_str = f'Current Depth: {current_depth:.4f}'
-        cv2.putText(vis_img_bgr, current_depth_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
-        next_line += 50
-        pred_depth_str = f'Predicted Depth: {pred_depth:.4f}'
-        cv2.putText(vis_img_bgr, pred_depth_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
-        next_line += 50
-        if not no_future_info:
-            future_depth_str = f'Future Depth: {future_depth:.4f}'
-            cv2.putText(vis_img_bgr, future_depth_str, (30, 190), font, 0.6, (0, 0, 0), 2, 0)
-            next_line += 50
-    passed_metric = None
-    if log_metric:
-        passed_metric = evaluate_metric(
-            task_name=task_name,
-            current_bbox=current_hand_bbox_list[0][hand],
-            pred_bbox=pred_hand_bbox,
-            current_depth=current_depth,
-            pred_depth=pred_depth
-        )
-        metric_str = f'Passed metric: {passed_metric}'
-        cv2.putText(vis_img_bgr, metric_str, (30, next_line), font, 0.6, (0, 0, 0), 2, 0)
-
-    vis_img = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
-    return vis_img.astype(np.uint8), passed_metric
-
-
-def generate_transferable_visualization():
-    from ss_utils.filter_utils import extract_pred_mesh_list
-    from renderer.image_utils import draw_hand_bbox
-    from mocap_utils.coordconv import convert_smpl_to_bbox, convert_bbox_to_oriIm
-
-
 def pose_to_joint_depth(
         hand_mocap,
         hand, pose, bbox, cam, img_shape,
@@ -436,7 +246,7 @@ def process_transferable_mocap_pred(
             mocap_pred = pickle.load(f)
     hand_info = mocap_pred
 
-    assert osp.exists(depth_norm_params_path),  "Depth normalization file {depth_norm_params_path} doesn't exist"
+    assert osp.exists(depth_norm_params_path),  f"Depth normalization file {depth_norm_params_path} doesn't exist"
     with open(depth_norm_params_path, 'rb') as f:
         depth_norm_params = pickle.load(f)
     depth_scale = depth_norm_params[depth_descriptor]['scale']
@@ -447,7 +257,6 @@ def process_transferable_mocap_pred(
     img_shape = hand_info['image_shape']
     img_x, img_y = img_shape[1], img_shape[0]
     hand_bbox = normalize_bbox(unnormalized_hand_bbox, (img_x, img_y))
-    hand_shape = hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
     wrist_3d = hand_info['pred_output_list'][0][hand]['pred_joints_img'][0]
     contact = hand_info['contact_filtered']
 
@@ -463,8 +272,7 @@ def process_transferable_mocap_pred(
     elif depth_descriptor == 'scaling_factor':
         cam_scale = camera[0]
         hand_boxScale_o2n = hand_info['pred_output_list'][0][hand]['bbox_scale_ratio']
-        scaling_factor = cam_scale / hand_boxScale_o2n
-        hand_depth_estimate = 1. / scaling_factor
+        hand_depth_estimate = scaling_factor_depth(cam_scale, hand_boxScale_o2n)
     elif depth_descriptor == 'normalized_bbox_size':
         *_, w, h = hand_bbox
         normalized_bbox_size = w * h
@@ -475,15 +283,24 @@ def process_transferable_mocap_pred(
     wrist_x_normalized = wrist_x_float / float(img_x)
     wrist_y_normalized = wrist_y_float / float(img_y)
     hand_depth_normalized = hand_depth_estimate * depth_scale
-    wrist_rotation = hand_pose[:3]
+    wrist_orientation = hand_pose[:3]
 
-    return (
-        wrist_x_normalized,
-        wrist_y_normalized,
-        hand_depth_normalized,
-        wrist_rotation,
-        contact,
-        img_shape
+    info = namedtuple('info', [
+        'wrist_x_normalized',
+        'wrist_y_normalized',
+        'hand_depth_normalized',
+        'wrist_orientation',
+        'contact',
+        'img_shape'
+    ])
+
+    return info(
+        wrist_x_normalized=wrist_x_normalized,
+        wrist_y_normalized=wrist_y_normalized,
+        hand_depth_normalized=hand_depth_normalized,
+        wrist_orientation=wrist_orientation,
+        contact=contact,
+        img_shape=img_shape
     )
 
 
@@ -542,6 +359,86 @@ def estimate_depth(eval_args, args, hand_bbox):
         pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
 
     return pred_hand_depth_estimate
+
+
+def evaluate_transferable_metric_batch_old(
+        task_names, task,
+        current_x, pred_x,
+        current_y, pred_y,
+        current_depth, pred_depth
+):
+    # Note: this implementation is not as efficient as the one below
+    metric_stats = {task_name: {'total': 0, 'success': 0} for task_name in task_names}
+    for i, t in enumerate(task):
+        task_name = task_names[torch.argmax(t)]
+        passed_metric = evaluate_transferable_metric(
+            task_name=task_name,
+            current_x=current_x[i], pred_x=pred_x[i],
+            current_y=current_y[i], pred_y=pred_y[i],
+            current_depth=current_depth[i], pred_depth=pred_depth[i],
+        )
+        metric_stats[task_name]['total'] += 1
+        metric_stats[task_name]['success'] += passed_metric.item()
+    return metric_stats
+
+
+def evaluate_transferable_metric_batch(
+        task_names, task, device,
+        current_x, pred_x,
+        current_y, pred_y,
+        current_depth, pred_depth
+):
+    metric_stats = {task_name: {'total': 0, 'success': 0} for task_name in task_names}
+    all_task_metric = []
+    for task_name in task_names:
+        if task_name == 'move_away':
+            all_task_metric.append((pred_depth > current_depth).unsqueeze(1))
+        elif task_name == 'move_towards':
+            all_task_metric.append((pred_depth < current_depth).unsqueeze(1))
+        elif task_name == 'move_down':
+            all_task_metric.append((pred_y > current_y).unsqueeze(1))
+        elif task_name == 'move_up':
+            all_task_metric.append((pred_y < current_y).unsqueeze(1))
+        elif task_name == 'pull_left' or task_name == 'push_left':
+            all_task_metric.append((pred_x < current_x).unsqueeze(1))
+        elif task_name == 'pull_right' or task_name == 'push_right':
+            all_task_metric.append((pred_x > current_x).unsqueeze(1))
+    all_task_metric = torch.hstack(all_task_metric)
+    task_inds = torch.argmax(task, dim=1).to(device)
+    task_metric = all_task_metric.gather(1, task_inds.unsqueeze(1))
+
+    for ind, metric in zip(task_inds, task_metric):
+        task_name = task_names[ind]
+        metric_stats[task_name]['total'] += 1
+        metric_stats[task_name]['success'] += metric.item()
+
+    return metric_stats
+
+
+def evaluate_transferable_metric(
+        task_name,
+        current_x, pred_x,
+        current_y, pred_y,
+        current_depth, pred_depth,
+):
+    assert task_name in [
+        'move_away', 'move_towards',
+        'move_down', 'move_up',
+        'pull_left', 'pull_right',
+        'push_left', 'push_right',
+    ], f'Unknown task name: {task_name}'
+    if task_name == 'move_away':
+        return pred_depth > current_depth
+    elif task_name == 'move_towards':
+        return pred_depth < current_depth
+    elif task_name == 'move_down':
+        return pred_y > current_y
+    elif task_name == 'move_up':
+        return pred_y < current_y
+    elif task_name == 'pull_left' or task_name == 'push_left':
+        return pred_x < current_x
+    elif task_name == 'pull_right' or task_name == 'push_right':
+        return pred_x > current_x
 
 
 def evaluate_metric(
@@ -628,10 +525,9 @@ class AvgrageMeter(object):
 
 if __name__ == '__main__':
     test_path_conversion = False
-    test_visualization = False
     test_pose_to_joint_z = False
-    test_robot_visualization = True
     test_metric = False
+    test_bar_plot = True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_visualizer = False
@@ -662,101 +558,6 @@ if __name__ == '__main__':
         print(f'Original bbox: {future_hand_bbox}')
         print(f'Normalized bbox: {norm_future_hand_bbox}')
         print(f'Unnormalized bbox: {unnorm_future_hand_bbox}')
-
-    if test_visualization:
-        # test visualization
-        frankmocap_path = '/home/junyao/LfHV/frankmocap'
-        r3m_path = '/home/junyao/LfHV/r3m'
-        sys.path.insert(1, frankmocap_path)
-        os.chdir(frankmocap_path)
-        from handmocap.hand_mocap_api import HandMocap
-
-        if use_visualizer:
-            print('Loading opengl visualizer.')
-            from renderer.visualizer import Visualizer
-
-            visualizer = Visualizer('opengl')
-        else:
-            visualizer = None
-        print('Loading frank mocap hand module.')
-        checkpoint_hand = join(
-            frankmocap_path,
-            'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
-        )
-        smpl_dir = join(frankmocap_path, 'extra_data/smpl')
-        hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
-        os.chdir(r3m_path)
-
-        current_hand_pose_path = '/home/junyao/test/mocap/frame10_prediction_result.pkl'
-        future_hand_pose_path = '/home/junyao/test/mocap/frame10_prediction_result.pkl'
-        hand = 'left_hand'
-
-        print('Preprocessing hand data from pkl.')
-        with open(future_hand_pose_path, 'rb') as f:
-            future_hand_info = pickle.load(f)
-        future_image_path = future_hand_info['image_path']
-        if future_image_path[:8] == '/scratch':
-            future_image_path = '/home' + future_image_path[8:]
-        future_image = cv2.imread(future_image_path)
-        future_hand_pose = future_hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
-        future_hand_bbox = normalize_bbox(
-            future_hand_info['hand_bbox_list'][0][hand],
-            (future_image.shape[1], future_image.shape[0])
-        )
-        future_camera = future_hand_info['pred_output_list'][0][hand]['pred_camera']
-        future_joint_depth = future_hand_info['pred_output_list'][0][hand]['pred_joints_img'][:, 2]
-        future_hand_shape = future_hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
-
-        task_names = [
-            'move_away',
-            'move_towards',
-            'move_down',
-            'move_up',
-            'pull_left',
-            'pull_right',
-            'push_left',
-            'push_right',
-            'push_slightly',
-        ]
-        task = np.zeros(len(task_names))
-        task[2] = 1
-
-        print('Begin visualization.')
-        vis_img = generate_single_visualization(
-            current_hand_pose_path=current_hand_pose_path,
-            future_hand_pose_path=None if no_future_info else future_hand_pose_path,
-            future_cam=future_camera,
-            hand=hand,
-            pred_hand_bbox=torch.from_numpy(future_hand_bbox).to(device),
-            pred_hand_pose=torch.from_numpy(future_hand_pose).to(device),
-            pred_hand_shape=torch.from_numpy(future_hand_shape).to(device),
-            task_names=task_names,
-            task=task,
-            visualizer=visualizer,
-            hand_mocap=hand_mocap,
-            use_visualizer=use_visualizer,
-            run_on_cv_server=True,
-            log_depth=True,
-            log_metric=True,
-            current_depth=1,
-            future_depth=future_joint_depth.mean(),
-            pred_depth=1
-        )
-
-        plt_path = 'vis_img.png'
-        plt.figure()
-        plt.imshow(vis_img)
-        plt.savefig('vis_img.png')
-        # plt.show()
-        plt.close()
-        print(f'Saved visualization image to {plt_path}.')
-
-        if log_tb:
-            from torch.utils.tensorboard import SummaryWriter
-            writer = SummaryWriter(log_dir='tb_vis_test')
-            writer.add_scalar('loss', 3, 1)
-            writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')
-            print(f'Saved tensorboard visualization image to tb_vis_test.')
 
     if test_pose_to_joint_z:
         # test pose to joint z
@@ -838,104 +639,6 @@ if __name__ == '__main__':
         print(f'joint_z: \n{joint_z}')
         print(f'gt_joint_z: \n{gt_joint_z}')
 
-    if test_robot_visualization:
-        # test visualization
-        frankmocap_path = '/home/junyao/LfHV/frankmocap'
-        r3m_path = '/home/junyao/LfHV/r3m'
-        sys.path.insert(1, frankmocap_path)
-        os.chdir(frankmocap_path)
-        from handmocap.hand_mocap_api import HandMocap
-
-        if use_visualizer:
-            print('Loading opengl visualizer.')
-            from renderer.visualizer import Visualizer
-
-            visualizer = Visualizer('opengl')
-        else:
-            visualizer = None
-        print('Loading frank mocap hand module.')
-        checkpoint_hand = join(
-            frankmocap_path,
-            'extra_data/hand_module/pretrained_weights/pose_shape_best.pth'
-        )
-        smpl_dir = join(frankmocap_path, 'extra_data/smpl')
-        hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
-        os.chdir(r3m_path)
-
-        current_hand_pose_path = '/home/junyao/Datasets/something_something_robot_demos/' \
-                                 'push_right/mocap_output/1/mocap/frame2_prediction_result.pkl'
-        future_hand_pose_path = '/home/junyao/Datasets/something_something_robot_demos/' \
-                                'push_right/mocap_output/1/mocap/frame3_prediction_result.pkl'
-        hand = 'left_hand'
-
-        print('Preprocessing hand data from pkl.')
-        with open(future_hand_pose_path, 'rb') as f:
-            future_hand_info = pickle.load(f)
-        future_image_path = future_hand_info['image_path']
-        if future_image_path[:8] == '/scratch':
-            future_image_path = '/home' + future_image_path[8:]
-        future_image = cv2.imread(future_image_path)
-        future_hand_pose = future_hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
-        future_hand_bbox = normalize_bbox(
-            future_hand_info['hand_bbox_list'][0][hand],
-            (future_image.shape[1], future_image.shape[0])
-        )
-        future_camera = future_hand_info['pred_output_list'][0][hand]['pred_camera']
-        future_joint_depth = future_hand_info['pred_output_list'][0][hand]['pred_joints_img'][:, 2]
-        future_hand_shape = future_hand_info['pred_output_list'][0][hand]['pred_hand_betas'].reshape(10)
-
-        task_names = [
-            'move_away',
-            'move_towards',
-            'move_down',
-            'move_up',
-            'pull_left',
-            'pull_right',
-            'push_left',
-            'push_right',
-            'push_slightly',
-            'push_left_right'
-        ]
-        task = np.zeros(len(task_names))
-        task[-1] = 1
-
-        print('Begin visualization.')
-        vis_img = generate_single_visualization(
-            current_hand_pose_path=current_hand_pose_path,
-            future_hand_pose_path=None if no_future_info else future_hand_pose_path,
-            future_cam=future_camera,
-            hand=hand,
-            pred_hand_bbox=torch.from_numpy(future_hand_bbox).to(device),
-            pred_hand_pose=torch.from_numpy(future_hand_pose).to(device),
-            pred_hand_shape=torch.from_numpy(future_hand_shape).to(device),
-            task_names=task_names,
-            task=task,
-            visualizer=visualizer,
-            hand_mocap=hand_mocap,
-            use_visualizer=use_visualizer,
-            run_on_cv_server=True,
-            robot_demos=True,
-            log_depth=True,
-            current_depth=1,
-            future_depth=future_joint_depth.mean(),
-            pred_depth=1
-        )
-
-        plt_path = 'vis_img.png'
-        plt.figure()
-        plt.imshow(vis_img)
-        plt.savefig('vis_img.png')
-        # plt.show()
-        plt.close()
-        print(f'Saved visualization image to {plt_path}.')
-
-        if log_tb:
-            from torch.utils.tensorboard import SummaryWriter
-            writer = SummaryWriter(log_dir='tb_vis_test')
-            writer.add_scalar('loss', 3, 1)
-            writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')
-            print(f'Saved tensorboard visualization image to tb_vis_test.')
-
     if test_metric:
         dataset_dir = '/home/junyao/Datasets/something_something_hand_demos'
         task = 'move_away'
@@ -952,5 +655,67 @@ if __name__ == '__main__':
 
         passed_metric = evaluate_metric(task_name=task, current_bbox=current_bbox, pred_bbox=future_bbox)
         print(f'Passed metric? {passed_metric}.')
+
+    if test_bar_plot:
+        import matplotlib.pyplot as plt
+        torch.manual_seed(43)
+        size = 128
+        plot_rate = True
+        plot_count = True
+
+        current_x, pred_x = torch.rand(size).cuda(), torch.rand(size).cuda()
+        current_y, pred_y = torch.rand(size).cuda(), torch.rand(size).cuda()
+        current_depth, pred_depth = torch.rand(size).cuda(), torch.rand(size).cuda()
+        CLUSTER_TASKS.remove('push_slightly')
+        task_names = CLUSTER_TASKS
+        # task_names = CV_TASKS
+        task_nums = torch.randint(low=0, high=len(task_names), size=(size,))
+        task = torch.nn.functional.one_hot(task_nums)
+
+        metric_stats = evaluate_transferable_metric_batch(
+            task_names, task, device,
+            current_x, pred_x,
+            current_y, pred_y,
+            current_depth, pred_depth,
+        )
+
+        if plot_rate:
+            plt.figure(figsize=(10, 7))
+            success_rate = [v['success'] / v['total'] for v in metric_stats.values()]
+            plt.bar(list(metric_stats.keys()), success_rate, width=0.7, color='skyblue')
+            for i, r in enumerate(success_rate):
+                plt.text(i, r / 2, f'{r:.2f}', ha='center', fontsize=15)
+            plt.xlabel('Tasks', fontweight='bold', size=13)
+            plt.ylabel('Success rate', fontweight='bold', size=13)
+            plt.tight_layout()
+            plt.savefig('success_rate_bar_plot.png')
+            plt.show()
+            plt.close()
+
+        if plot_count:
+            bar_width = 0.35
+            plt.figure(figsize=(10, 7))
+
+            success = [v['success'] for v in metric_stats.values()]
+            total = [v['total'] for v in metric_stats.values()]
+
+            bar1 = np.arange(len(metric_stats))
+            bar2 = [x + bar_width for x in bar1]
+
+            plt.bar(bar1, success, color='peachpuff', width=bar_width, label='success')
+            plt.bar(bar2, total, color='lavender', width=bar_width, label='total')
+            for b1, s, b2, t in zip(bar1, success, bar2, total):
+                plt.text(b1, s / 2, s, ha='center', fontsize=8)
+                plt.text(b2, t / 2, t, ha='center', fontsize=8)
+
+            plt.xlabel('Tasks', fontweight='bold', size=13)
+            plt.ylabel('Count', fontweight='bold', size=13)
+            plt.xticks([r + bar_width / 2 for r in bar1], list(metric_stats.keys()))
+
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig('count_bar_plot.png')
+            plt.show()
+            plt.close()
 
     pass
