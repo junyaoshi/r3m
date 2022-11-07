@@ -6,6 +6,7 @@ from tqdm import tqdm
 import sys
 from collections import namedtuple
 from pprint import pprint
+from datetime import timedelta
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -134,6 +135,7 @@ def parse_args():
 
 
 def main(args):
+    program_start = time.time()
     if args.sanity_check:
         args.no_shuffle = True
         args.eval_on_train = True
@@ -200,7 +202,7 @@ def main(args):
 
     # create data loaders
     print('Creating data loaders...')
-    start = time.time()
+    data_start = time.time()
     train_data = AgentTransferable(
         data_home_dir=args.data_home_dir,
         task_names=task_names,
@@ -216,8 +218,8 @@ def main(args):
         has_task_labels=True,
         has_future_labels=True
     )
-    end = time.time()
-    print(f'Loaded train data. Time: {end - start:.5f} seconds')
+    data_end = time.time()
+    print(f'Loaded train data. Time: {data_end - data_start:.5f} seconds')
     if args.sanity_check:
         print(f'Performing sanity check on {args.sanity_check_size} examples.')
         indices = np.random.choice(range(1, len(train_data)), size=args.sanity_check_size)
@@ -227,7 +229,7 @@ def main(args):
         print('Evaluating on training set instead of validation set.')
         valid_data = train_data
     else:
-        start = time.time()
+        data_start = time.time()
         valid_data = AgentTransferable(
             data_home_dir=args.data_home_dir,
             task_names=task_names,
@@ -243,8 +245,8 @@ def main(args):
             has_task_labels=True,
             has_future_labels=True
         )
-        end = time.time()
-        print(f'Loaded valid data. Time: {end - start:.5f} seconds')
+        data_end = time.time()
+        print(f'Loaded valid data. Time: {data_end - data_start:.5f} seconds')
     print(f'There are {len(valid_data)} valid data.')
 
     dataloader_num_workers = args.num_workers
@@ -280,6 +282,7 @@ def main(args):
         global_step, init_epoch = 0, 1
 
     for epoch in range(init_epoch, args.epochs + 1):
+        epoch_start = time.time()
         print(f'\nepoch {epoch}')
 
         # Training.
@@ -314,7 +317,14 @@ def main(args):
                 join(args.save, f'checkpoint_{epoch:04d}.pt')
             )
 
+        epoch_end = time.time()
+        epoch_elapsed = str(timedelta(seconds=round(epoch_end - epoch_start, 2))).split('.')[0]
+        program_elapsed = str(timedelta(seconds=round(epoch_end - program_start, 2))).split('.')[0]
+        print(f'Epoch elapsed time: {epoch_elapsed}')
+        print(f'Program elapsed time: {program_elapsed}')
+
     # Final validation.
+    print('\nFinal validation.')
     valid_stats = test(
         valid_queue, model, device,
         l2_loss_func, bce_loss_func,
@@ -324,6 +334,10 @@ def main(args):
     )
 
     log_epoch_stats(valid_stats, writer, args, global_step, args.epochs, train=False)
+
+    program_end = time.time()
+    program_elapsed = str(timedelta(seconds=round(program_end - program_start, 2))).split('.')[0]
+    print(f'\nDone. Program elapsed time: {program_elapsed}')
 
 
 def train(
@@ -621,7 +635,7 @@ def train(
 
                         task_vis_img = generate_transferable_visualization(
                             current_hand_pose_path=data.current_info_path[i],
-                            future_hand_pose_path=data.future_info_path[i],
+                            future_hand_pose_path=None,
                             run_on_cv_server=args.run_on_cv_server,
                             hand=data.hand[i],
                             pred_delta_x=pred_delta_x.item(),
@@ -638,11 +652,14 @@ def train(
                             device=device,
                             log_metric=True,
                             passed_metric=passed_metric.item(),
-                            original_task=task_name == original_task_name
+                            original_task=task_name == original_task_name,
+                            vis_groundtruth=False
                         )
                         task_vis_imgs.append(task_vis_img)
                     final_task_vis_img = np.hstack(task_vis_imgs)
-                    writer.add_image(f'train/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
+                    writer.add_image(
+                        f'train_eval_tasks/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC'
+                    )
 
             model.train()
 
@@ -961,7 +978,7 @@ def test(
 
                     task_vis_img = generate_transferable_visualization(
                         current_hand_pose_path=data.current_info_path[i],
-                        future_hand_pose_path=data.future_info_path[i],
+                        future_hand_pose_path=None,
                         run_on_cv_server=args.run_on_cv_server,
                         hand=data.hand[i],
                         pred_delta_x=pred_delta_x.item(),
@@ -978,11 +995,12 @@ def test(
                         device=device,
                         log_metric=True,
                         passed_metric=passed_metric.item(),
-                        original_task=task_name == original_task_name
+                        original_task=task_name == original_task_name,
+                        vis_groundtruth=False
                     )
                     task_vis_imgs.append(task_vis_img)
                 final_task_vis_img = np.hstack(task_vis_imgs)
-                writer.add_image(f'valid/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
+                writer.add_image(f'valid_eval_tasks/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
                 task_vis_sample_count += 1
 
     stats = namedtuple('stats', [
@@ -1133,7 +1151,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         plt.ylim([0, 1])
         plt.title('1D Metric Evaluation')
         plt.tight_layout()
-        writer.add_figure(f'{mode}_metric/task_conditioning_success_rate', fig, epoch)
+        writer.add_figure(f'{mode}_eval_tasks_metric/task_conditioning_success_rate', fig, epoch)
         plt.close(fig)
 
         # visualize metric evaluation count by bar plot
@@ -1156,7 +1174,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         plt.xticks([r + bar_width / 2 for r in bar1], list(task_metric_stats.keys()))
         plt.legend()
         plt.tight_layout()
-        writer.add_figure(f'{mode}_metric/task_conditioning_count', fig, epoch)
+        writer.add_figure(f'{mode}_eval_tasks_metric/task_conditioning_count', fig, epoch)
         plt.close(fig)
 
 
