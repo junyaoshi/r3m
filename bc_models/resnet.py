@@ -1,6 +1,9 @@
 import torch
 from torch import nn
 
+BN_TRACK_STATS = True
+AFFINE = True
+
 
 class block(nn.Module):
     def __init__(self, num_features):
@@ -24,10 +27,10 @@ class block(nn.Module):
         """
         # Setup layers
         self.fc1 = nn.Linear(num_features, num_features, bias=False)
-        self.bn1 = nn.BatchNorm1d(num_features)
+        self.bn1 = nn.BatchNorm1d(num_features, track_running_stats=BN_TRACK_STATS, affine=AFFINE)
         self.relu1 = nn.ReLU()
         self.fc2 = nn.Linear(num_features, num_features, bias=False)
-        self.bn2 = nn.BatchNorm1d(num_features)
+        self.bn2 = nn.BatchNorm1d(num_features, track_running_stats=BN_TRACK_STATS, affine=AFFINE)
         self.relu2 = nn.ReLU()
 
     def shortcut(self, z, x):
@@ -79,9 +82,9 @@ class EndtoEndNet(nn.Module):
         self.residual = residual
 
         # Input
-        self.bn0 = nn.BatchNorm1d(in_features)
+        self.bn0 = nn.BatchNorm1d(in_features, track_running_stats=BN_TRACK_STATS, affine=AFFINE)
         self.fcIn = nn.Linear(in_features, 256, bias=False)
-        self.bnIn = nn.BatchNorm1d(256)
+        self.bnIn = nn.BatchNorm1d(256, track_running_stats=BN_TRACK_STATS, affine=AFFINE)
         self.relu = nn.ReLU()
 
         self.stack = nn.ModuleList([block(256) for _ in range(n_blocks)])
