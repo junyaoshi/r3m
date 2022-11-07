@@ -1,14 +1,13 @@
 # command line flags
-while getopts n:b:t:m:c:d: flag
+while getopts n:b:t:m:d: flag
 do
     case "${flag}" in
         n) n_blocks=${OPTARG};;
         b) batch_size=${OPTARG};;
         t) net_type=${OPTARG};;
         m) pred_mode=${OPTARG};;
-        c) cuda_device=${OPTARG};;
         d) date_time=${OPTARG};;
-        *) echo "usage: $0 [-n] [-b] [-t] [-m] [-c] [-d]" >&2
+        *) echo "usage: $0 [-n] [-b] [-t] [-m] [-d]" >&2
            exit 1 ;;
     esac
 done
@@ -28,13 +27,14 @@ export SANITY_CHECK_SIZE=$batch_size; echo "SANITY_CHECK_SIZE: ${SANITY_CHECK_SI
 export BATCH_SIZE=$batch_size; echo "BATCH_SIZE: ${BATCH_SIZE}"
 export VIS_SAMPLE_SIZE=5; echo "VIS_SAMPLE_SIZE: ${VIS_SAMPLE_SIZE}"
 export TASK_VIS_SAMPLE_SIZE=0; echo "TASK_VIS_SAMPLE_SIZE: ${TASK_VIS_SAMPLE_SIZE}"
-export NUM_WORKERS=4; echo "NUM_WORKERS: ${NUM_WORKERS}"
+export NUM_WORKERS=8; echo "NUM_WORKERS: ${NUM_WORKERS}"
 export DATETIME=$date_time; echo "DATETIME: ${DATETIME}"
-export SAVE="sanity_check/${DATETIME}/cv_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_date=${DATETIME}"
+export SAVE="sanity_check/${DATETIME}/cluster_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_date=${DATETIME}"
 # export SAVE="sanity_check/batchnorm_check_${DATETIME}/bsize=${BATCH_SIZE}_affine=false_forward=false"
 echo "SAVE: ${SAVE}"
+export DATA_HOME_DIR="/scratch/junyao/Datasets/something_something_processed"; echo "DATA_HOME_DIR: ${DATA_HOME_DIR}"
 
-CUDA_VISIBLE_DEVICES=$cuda_device xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
+xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
 --n_blocks=${N_BLOCKS} \
 --net_type=${NET_TYPE} \
 --lr=${LR} \
@@ -52,6 +52,6 @@ CUDA_VISIBLE_DEVICES=$cuda_device xvfb-run -a python /home/junyao/LfHV/r3m/train
 --vis_sample_size=${VIS_SAMPLE_SIZE} \
 --task_vis_sample_size=${TASK_VIS_SAMPLE_SIZE} \
 --num_workers=${NUM_WORKERS} \
---run_on_cv_server \
 --use_visualizer \
 --save=${SAVE} \
+--data_home_dir=${DATA_HOME_DIR} \

@@ -1,50 +1,38 @@
-# command line flags
-while getopts n:t:m:c:d: flag
-do
-    case "${flag}" in
-        n) n_blocks=${OPTARG};;
-        t) net_type=${OPTARG};;
-        m) pred_mode=${OPTARG};;
-        c) cuda_device=${OPTARG};;
-        d) date_time=${OPTARG};;
-        *) echo "usage: $0 [-n] [-t] [-m]" >&2
-           exit 1 ;;
-    esac
-done
-
 #!/bin/bash
-#SBATCH --mem-per-gpu=12G
+#SBATCH --mem-per-gpu=24G
 #SBATCH --partition=dineshj-compute
 #SBATCH --qos=dineshj-high
 #SBATCH --cpus-per-gpu=4
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --gpus=1
-#SBATCH -w node-2080ti-5
-#SBATCH --job-name=bc_trans
-#SBATCH -o agent_transfer_out/nblocks=8_pred=res.out
+#SBATCH -w node-3090-0
+#SBATCH --job-name=n32lam
+#SBATCH -o /home/junyao/transferable_out/nblocks=32_lambdas.out
 
-
-export N_BLOCKS=$n_blocks; echo "N_BLOCKS: ${N_BLOCKS}"
-export NET_TYPE=$net_type; echo "NET_TYPE: ${NET_TYPE}"
-export LR=0.0004; echo "LR: ${LR}"
-export LAMBDA1=1; echo "LAMBDA1: ${LAMBDA1}"
+export N_BLOCKS=32; echo "N_BLOCKS: ${N_BLOCKS}"
+export LAMBDA1=20; echo "LAMBDA1: ${LAMBDA1}"
 export LAMBDA2=1; echo "LAMBDA2: ${LAMBDA2}"
 export LAMBDA3=1; echo "LAMBDA3: ${LAMBDA3}"
-export LAMBDA4=1; echo "LAMBDA4: ${LAMBDA4}"
-export PRED_NODE=$pred_mode; echo "PRED_NODE: ${PRED_NODE}"
-export EVAL_FREQ=20; echo "EVAL_FREQ: ${EVAL_FREQ}"
-export SAVE_FREQ=300; echo "SAVE_FREQ: ${SAVE_FREQ}"
-export EPOCHS=300; echo "EPOCHS: ${EPOCHS}"
-export SANITY_CHECK_SIZE=32; echo "SANITY_CHECK_SIZE: ${SANITY_CHECK_SIZE}"
-export BATCH_SIZE=8; echo "BATCH_SIZE: ${BATCH_SIZE}"
+export LAMBDA4=3; echo "LAMBDA4: ${LAMBDA4}"
+export NET_TYPE="residual"; echo "NET_TYPE: ${NET_TYPE}"
+export LR=0.0004; echo "LR: ${LR}"
+export PRED_NODE="residual"; echo "PRED_NODE: ${PRED_NODE}"
+export EVAL_FREQ=2; echo "EVAL_FREQ: ${EVAL_FREQ}"
+export LOG_SCALAR_FREQ=100; echo "LOG_SCALAR_FREQ: ${LOG_SCALAR_FREQ}"
+export SAVE_FREQ=5; echo "SAVE_FREQ: ${SAVE_FREQ}"
+export VIS_FREQ=2000; echo "VIS_FREQ: ${VIS_FREQ}"
+export EPOCHS=500; echo "EPOCHS: ${EPOCHS}"
+export BATCH_SIZE=128; echo "BATCH_SIZE: ${BATCH_SIZE}"
 export VIS_SAMPLE_SIZE=8; echo "VIS_SAMPLE_SIZE: ${VIS_SAMPLE_SIZE}"
-export TASK_VIS_SAMPLE_SIZE=0; echo "TASK_VIS_SAMPLE_SIZE: ${TASK_VIS_SAMPLE_SIZE}"
-export NUM_WORKERS=2; echo "NUM_WORKERS: ${NUM_WORKERS}"
-export DATETIME=$date_time; echo "DATETIME: ${DATETIME}"
-export SAVE="sanity_check/cv_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_date=${DATETIME}"
+export TASK_VIS_SAMPLE_SIZE=5; echo "TASK_VIS_SAMPLE_SIZE: ${TASK_VIS_SAMPLE_SIZE}"
+export NUM_WORKERS=4; echo "NUM_WORKERS: ${NUM_WORKERS}"
+export DATETIME=11041800; echo "DATETIME: ${DATETIME}"
+export SAVE="${DATETIME}/cluster_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_lr=${LR}\
+_lambdas=[${LAMBDA1},${LAMBDA2},${LAMBDA3},${LAMBDA4}]_batch=${BATCH_SIZE}"
 echo "SAVE: ${SAVE}"
+export DATA_HOME_DIR="/scratch/junyao/Datasets/something_something_processed"; echo "DATA_HOME_DIR: ${DATA_HOME_DIR}"
 
-CUDA_VISIBLE_DEVICES=$cuda_device xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
+xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
 --n_blocks=${N_BLOCKS} \
 --net_type=${NET_TYPE} \
 --lr=${LR} \
@@ -54,14 +42,17 @@ CUDA_VISIBLE_DEVICES=$cuda_device xvfb-run -a python /home/junyao/LfHV/r3m/train
 --lambda4=${LAMBDA4} \
 --pred_mode=${PRED_NODE} \
 --eval_freq=${EVAL_FREQ} \
+--log_scalar_freq=${LOG_SCALAR_FREQ} \
 --save_freq=${SAVE_FREQ} \
+--vis_freq=${VIS_FREQ} \
 --epochs=${EPOCHS} \
---sanity_check \
---sanity_check_size=${SANITY_CHECK_SIZE} \
+--eval_tasks \
 --batch_size=${BATCH_SIZE} \
 --vis_sample_size=${VIS_SAMPLE_SIZE} \
 --task_vis_sample_size=${TASK_VIS_SAMPLE_SIZE} \
 --num_workers=${NUM_WORKERS} \
---run_on_cv_server \
 --use_visualizer \
 --save=${SAVE} \
+--data_home_dir=${DATA_HOME_DIR} \
+
+wait
