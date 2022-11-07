@@ -14,6 +14,7 @@ export LAMBDA1=20; echo "LAMBDA1: ${LAMBDA1}"
 export LAMBDA2=1; echo "LAMBDA2: ${LAMBDA2}"
 export LAMBDA3=1; echo "LAMBDA3: ${LAMBDA3}"
 export LAMBDA4=3; echo "LAMBDA4: ${LAMBDA4}"
+export TIME_INTERVAL=15; echo "TIME_INTERVAL: ${TIME_INTERVAL}"
 export NET_TYPE="residual"; echo "NET_TYPE: ${NET_TYPE}"
 export LR=0.0004; echo "LR: ${LR}"
 export PRED_NODE="residual"; echo "PRED_NODE: ${PRED_NODE}"
@@ -35,6 +36,7 @@ export DATA_HOME_DIR="/scratch/junyao/Datasets/something_something_processed"; e
 xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
 --n_blocks=${N_BLOCKS} \
 --net_type=${NET_TYPE} \
+--time_interval=${TIME_INTERVAL} \
 --lr=${LR} \
 --lambda1=${LAMBDA1} \
 --lambda2=${LAMBDA2} \
