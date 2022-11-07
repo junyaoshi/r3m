@@ -80,14 +80,14 @@ def parse_args():
     parser.add_argument('--eval_on_train', action='store_true', default=False,
                         help='Evaluate model on training set instead of validation set (for debugging)')
     parser.add_argument('--eval_tasks', action='store_true',
-                        help='if true, evaluate conditioning on different tasks using the last batch of valid set')
+                        help='if true, perform task-conditioned evaluatuation')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='batch size per GPU')
     parser.add_argument('--vis_sample_size', type=int, default=5,
                         help='number of samples to visualize on tensorboard, set to 0 to disable')
     parser.add_argument('--task_vis_sample_size', type=int, default=2,
                         help='number of task-conditioned samples to visualize on tensorboard, '
-                             'set to 0 to disable')
+                             'set to 0 to disable task-conditioned visualization')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='number of workers for dataloaders')
     parser.add_argument('--cont_training', action='store_true', default=False,
@@ -571,77 +571,78 @@ def train(
             writer.add_image(f'train/vis_images', final_vis_img, global_step, dataformats='HWC')
 
             # visualize different task conditioning
-            for i in range(args.task_vis_sample_size):
-                # process task input
-                original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
-                all_task_instances = []
-                for j, task_name in enumerate(task_names):
-                    task_instance = torch.zeros(1, len(task_names))
-                    task_instance[0, j] = 1
-                    all_task_instances.append(task_instance)
-                all_task_instances = torch.vstack(all_task_instances)
+            if args.eval_tasks:
+                for i in range(args.task_vis_sample_size):
+                    # process task input
+                    original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
+                    all_task_instances = []
+                    for j, task_name in enumerate(task_names):
+                        task_instance = torch.zeros(1, len(task_names))
+                        task_instance[0, j] = 1
+                        all_task_instances.append(task_instance)
+                    all_task_instances = torch.vstack(all_task_instances)
 
-                task_conditioned_input = torch.cat((
-                    data.hand_r3m[i].repeat(len(task_names), 1),
-                    all_task_instances,
-                    data.current_x[i].repeat(len(task_names), 1),
-                    data.current_y[i].repeat(len(task_names), 1),
-                    data.current_depth[i].repeat(len(task_names), 1),
-                    data.current_ori[i].repeat(len(task_names), 1),
-                    data.current_contact[i].repeat(len(task_names), 1),
-                ), dim=1).to(device).float()
+                    task_conditioned_input = torch.cat((
+                        data.hand_r3m[i].repeat(len(task_names), 1),
+                        all_task_instances,
+                        data.current_x[i].repeat(len(task_names), 1),
+                        data.current_y[i].repeat(len(task_names), 1),
+                        data.current_depth[i].repeat(len(task_names), 1),
+                        data.current_ori[i].repeat(len(task_names), 1),
+                        data.current_contact[i].repeat(len(task_names), 1),
+                    ), dim=1).to(device).float()
 
-                # forward through network and process output
-                model.eval()
-                with torch.no_grad():
-                    task_conditioned_output = model(task_conditioned_input)
-                    t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
-                    t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
-                    if not args.pred_residual:
-                        t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
+                    # forward through network and process output
+                    model.eval()
+                    with torch.no_grad():
+                        task_conditioned_output = model(task_conditioned_input)
+                        t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
+                        t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
+                        if not args.pred_residual:
+                            t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
 
-                task_vis_imgs = []
-                for j, task_name in enumerate(task_names):
-                    pred_delta_x = t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0] - current_x[i]
-                    pred_delta_y = t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1] - current_y[i]
-                    pred_delta_depth = t_pred_depth[j] if args.pred_residual else t_pred_depth[j] - current_depth[i]
-                    pred_delta_ori = t_pred_ori[j] if args.pred_residual else t_pred_ori[j] - current_ori[i]
-                    pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j]))
+                    task_vis_imgs = []
+                    for j, task_name in enumerate(task_names):
+                        pred_delta_x = t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0] - current_x[i]
+                        pred_delta_y = t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1] - current_y[i]
+                        pred_delta_depth = t_pred_depth[j] if args.pred_residual else t_pred_depth[j] - current_depth[i]
+                        pred_delta_ori = t_pred_ori[j] if args.pred_residual else t_pred_ori[j] - current_ori[i]
+                        pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j]))
 
-                    passed_metric = evaluate_transferable_metric(
-                        task_name=task_name,
-                        current_x=current_x[i],
-                        pred_x=current_x[i] + t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0],
-                        current_y=current_y[i],
-                        pred_y=current_y[i] + t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1],
-                        current_depth=current_depth[i],
-                        pred_depth=current_depth[i] + t_pred_depth[j] if args.pred_residual else t_pred_depth[j],
-                    )
+                        passed_metric = evaluate_transferable_metric(
+                            task_name=task_name,
+                            current_x=current_x[i],
+                            pred_x=current_x[i] + t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0],
+                            current_y=current_y[i],
+                            pred_y=current_y[i] + t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1],
+                            current_depth=current_depth[i],
+                            pred_depth=current_depth[i] + t_pred_depth[j] if args.pred_residual else t_pred_depth[j],
+                        )
 
-                    task_vis_img = generate_transferable_visualization(
-                        current_hand_pose_path=data.current_info_path[i],
-                        future_hand_pose_path=data.future_info_path[i],
-                        run_on_cv_server=args.run_on_cv_server,
-                        hand=data.hand[i],
-                        pred_delta_x=pred_delta_x.item(),
-                        pred_delta_y=pred_delta_y.item(),
-                        pred_delta_depth=pred_delta_depth.item(),
-                        pred_delta_ori=pred_delta_ori,
-                        pred_contact=pred_contact_binary,
-                        depth_norm_params=args.depth_norm_params,
-                        ori_norm_params=args.ori_norm_params,
-                        task_name=task_name,
-                        visualizer=visualizer,
-                        use_visualizer=args.use_visualizer,
-                        hand_mocap=hand_mocap,
-                        device=device,
-                        log_metric=True,
-                        passed_metric=passed_metric.item(),
-                        original_task=task_name == original_task_name
-                    )
-                    task_vis_imgs.append(task_vis_img)
-                final_task_vis_img = np.hstack(task_vis_imgs)
-                writer.add_image(f'train/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
+                        task_vis_img = generate_transferable_visualization(
+                            current_hand_pose_path=data.current_info_path[i],
+                            future_hand_pose_path=data.future_info_path[i],
+                            run_on_cv_server=args.run_on_cv_server,
+                            hand=data.hand[i],
+                            pred_delta_x=pred_delta_x.item(),
+                            pred_delta_y=pred_delta_y.item(),
+                            pred_delta_depth=pred_delta_depth.item(),
+                            pred_delta_ori=pred_delta_ori,
+                            pred_contact=pred_contact_binary,
+                            depth_norm_params=args.depth_norm_params,
+                            ori_norm_params=args.ori_norm_params,
+                            task_name=task_name,
+                            visualizer=visualizer,
+                            use_visualizer=args.use_visualizer,
+                            hand_mocap=hand_mocap,
+                            device=device,
+                            log_metric=True,
+                            passed_metric=passed_metric.item(),
+                            original_task=task_name == original_task_name
+                        )
+                        task_vis_imgs.append(task_vis_img)
+                    final_task_vis_img = np.hstack(task_vis_imgs)
+                    writer.add_image(f'train/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
 
             model.train()
 
@@ -845,7 +846,7 @@ def test(
         epoch_mean_contact_loss.update(mean_contact_loss.data, 1)
         epoch_mean_contact_acc.update(mean_contact_acc.data, 1)
 
-    # visualize some samples in the batch
+    # visualize some samples in the last batch
     vis_imgs = []
     for i in range(args.vis_sample_size):
         pred_delta_x = pred_xy[i, 0] if args.pred_residual else pred_xy[i, 0] - current_x[i]
@@ -888,79 +889,9 @@ def test(
     final_vis_img = np.hstack(vis_imgs)
     writer.add_image(f'valid/vis_images', final_vis_img, global_step, dataformats='HWC')
 
-    # visualize different task conditioning
-    for i in range(args.task_vis_sample_size):
-        original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
-        all_task_instances = []
-        for j, task_name in enumerate(task_names):
-            task_instance = torch.zeros(1, len(task_names))
-            task_instance[0, j] = 1
-            all_task_instances.append(task_instance)
-        all_task_instances = torch.vstack(all_task_instances)
-
-        task_conditioned_input = torch.cat((
-            data.hand_r3m[i].repeat(len(task_names), 1),
-            all_task_instances,
-            data.current_x[i].repeat(len(task_names), 1),
-            data.current_y[i].repeat(len(task_names), 1),
-            data.current_depth[i].repeat(len(task_names), 1),
-            data.current_ori[i].repeat(len(task_names), 1),
-            data.current_contact[i].repeat(len(task_names), 1),
-        ), dim=1).to(device).float()
-
-        with torch.no_grad():
-            task_conditioned_output = model(task_conditioned_input)
-            t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
-            t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
-            if not args.pred_residual:
-                t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
-
-        task_vis_imgs = []
-        for j, task_name in enumerate(task_names):
-            pred_delta_x = t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0] - current_x[i]
-            pred_delta_y = t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1] - current_y[i]
-            pred_delta_depth = t_pred_depth[j] if args.pred_residual else t_pred_depth[j] - current_depth[i]
-            pred_delta_ori = t_pred_ori[j] if args.pred_residual else t_pred_ori[j] - current_ori[i]
-            pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j]))
-
-            passed_metric = evaluate_transferable_metric(
-                task_name=task_name,
-                current_x=current_x[i],
-                pred_x=current_x[i] + t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0],
-                current_y=current_y[i],
-                pred_y=current_y[i] + t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1],
-                current_depth=current_depth[i],
-                pred_depth=current_depth[i] + t_pred_depth[j] if args.pred_residual else t_pred_depth[j],
-            )
-
-            task_vis_img = generate_transferable_visualization(
-                current_hand_pose_path=data.current_info_path[i],
-                future_hand_pose_path=data.future_info_path[i],
-                run_on_cv_server=args.run_on_cv_server,
-                hand=data.hand[i],
-                pred_delta_x=pred_delta_x.item(),
-                pred_delta_y=pred_delta_y.item(),
-                pred_delta_depth=pred_delta_depth.item(),
-                pred_delta_ori=pred_delta_ori,
-                pred_contact=pred_contact_binary,
-                depth_norm_params=args.depth_norm_params,
-                ori_norm_params=args.ori_norm_params,
-                task_name=task_name,
-                visualizer=visualizer,
-                use_visualizer=args.use_visualizer,
-                hand_mocap=hand_mocap,
-                device=device,
-                log_metric=True,
-                passed_metric=passed_metric.item(),
-                original_task=task_name == original_task_name
-            )
-            task_vis_imgs.append(task_vis_img)
-        final_task_vis_img = np.hstack(task_vis_imgs)
-        writer.add_image(f'valid/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
-
-    # evaluate task conditioning on last batch
+    # task-conditioned evaluation
     if args.eval_tasks:
-        data = next(iter(valid_queue))
+        task_vis_sample_count = 0
         task_metric_stats = {task_name: {'total': 0, 'pred_success': 0} for task_name in task_names}
         all_task_instances = []
         for j, task_name in enumerate(task_names):
@@ -969,6 +900,7 @@ def test(
             all_task_instances.append(task_instance)
         all_task_instances = torch.vstack(all_task_instances)
         for i in range(len(data)):
+            original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
             task_conditioned_input = torch.cat((
                 data.hand_r3m[i].repeat(len(task_names), 1),
                 all_task_instances,
@@ -982,6 +914,9 @@ def test(
             with torch.no_grad():
                 task_conditioned_output = model(task_conditioned_input)
                 t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
+                t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
+                if not args.pred_residual:
+                    t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
 
             # process metric evaluation
             t_current_x = data.current_x[i].repeat(len(task_names)).to(device).float()
@@ -1003,6 +938,52 @@ def test(
             for k, v in metric_stats.items():
                 task_metric_stats[k]['total'] += v['total']
                 task_metric_stats[k]['pred_success'] += v['pred_success']
+
+            # visualize some samples of task-conditioned evaluation
+            if task_vis_sample_count < args.task_vis_sample_size:
+                task_vis_imgs = []
+                for j, task_name in enumerate(task_names):
+                    pred_delta_x = t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0] - current_x[i]
+                    pred_delta_y = t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1] - current_y[i]
+                    pred_delta_depth = t_pred_depth[j] if args.pred_residual else t_pred_depth[j] - current_depth[i]
+                    pred_delta_ori = t_pred_ori[j] if args.pred_residual else t_pred_ori[j] - current_ori[i]
+                    pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j]))
+
+                    passed_metric = evaluate_transferable_metric(
+                        task_name=task_name,
+                        current_x=current_x[i],
+                        pred_x=current_x[i] + t_pred_xy[j, 0] if args.pred_residual else t_pred_xy[j, 0],
+                        current_y=current_y[i],
+                        pred_y=current_y[i] + t_pred_xy[j, 1] if args.pred_residual else t_pred_xy[j, 1],
+                        current_depth=current_depth[i],
+                        pred_depth=current_depth[i] + t_pred_depth[j] if args.pred_residual else t_pred_depth[j],
+                    )
+
+                    task_vis_img = generate_transferable_visualization(
+                        current_hand_pose_path=data.current_info_path[i],
+                        future_hand_pose_path=data.future_info_path[i],
+                        run_on_cv_server=args.run_on_cv_server,
+                        hand=data.hand[i],
+                        pred_delta_x=pred_delta_x.item(),
+                        pred_delta_y=pred_delta_y.item(),
+                        pred_delta_depth=pred_delta_depth.item(),
+                        pred_delta_ori=pred_delta_ori,
+                        pred_contact=pred_contact_binary,
+                        depth_norm_params=args.depth_norm_params,
+                        ori_norm_params=args.ori_norm_params,
+                        task_name=task_name,
+                        visualizer=visualizer,
+                        use_visualizer=args.use_visualizer,
+                        hand_mocap=hand_mocap,
+                        device=device,
+                        log_metric=True,
+                        passed_metric=passed_metric.item(),
+                        original_task=task_name == original_task_name
+                    )
+                    task_vis_imgs.append(task_vis_img)
+                final_task_vis_img = np.hstack(task_vis_imgs)
+                writer.add_image(f'valid/vis_tasks_{i}', final_task_vis_img, global_step, dataformats='HWC')
+                task_vis_sample_count += 1
 
     stats = namedtuple('stats', [
         'loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc',
@@ -1139,7 +1120,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     if not train and args.eval_tasks:
         # visualize metric evaluation success rate by bar plot
         bar_width = 0.7
-        fig = plt.figure(figsize=(1 * n_task, fig_height))
+        fig = plt.figure(figsize=(2 * n_task, fig_height))
         epoch_success_rate = [
             v['pred_success'] / v['total'] if v['total'] != 0 else 0
             for v in task_metric_stats.values()
@@ -1157,7 +1138,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
 
         # visualize metric evaluation count by bar plot
         bar_width = 0.35
-        fig = plt.figure(figsize=(2 * n_task, fig_height))
+        fig = plt.figure(figsize=(3 * n_task, fig_height))
 
         success = [v['pred_success'] for v in task_metric_stats.values()]
         total = [v['total'] for v in task_metric_stats.values()]
