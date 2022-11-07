@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import Dataset
 
 from utils.bc_utils import (
-    determine_which_hand, normalize_bbox,
+    determine_which_hand, normalize_bbox, load_pkl,
     process_mocap_pred, process_transferable_mocap_pred,
     CLUSTER_TASKS
 )
@@ -475,7 +475,7 @@ class AgentTransferable(Dataset):
     def __init__(self, data_home_dir,
                  task_names=None, split=None,
                  iou_thresh=0.7, time_interval=5,
-                 depth_descriptor='scaling_factor', depth_norm_params_path='',
+                 depth_descriptor='scaling_factor', depth_norm_params=None, ori_norm_params=None,
                  debug=False, run_on_cv_server=False, num_cpus=4,
                  has_task_labels=True, has_future_labels=True):
         """
@@ -487,15 +487,18 @@ class AgentTransferable(Dataset):
         self.iou_thresh = iou_thresh
         self.time_interval = time_interval
         self.depth_descriptor = depth_descriptor
-        self.depth_norm_params_path = depth_norm_params_path
+        self.depth_norm_params = depth_norm_params
+        self.ori_norm_params = ori_norm_params
         self.debug = debug
         self.run_on_cv_server = run_on_cv_server
+        self.num_cpus=num_cpus
         self.has_task_labels = has_task_labels
         self.has_future_labels = has_future_labels
 
         self.num_tasks = len(task_names)
         self.task_dict = {}
 
+        assert depth_norm_params is not None and ori_norm_params is not None, "Normalization params cannot be None"
         assert split in ['train', 'valid', None]
         if has_task_labels:
             print(f'Initializing dataset for tasks: \n{task_names}.')
@@ -626,10 +629,56 @@ class AgentTransferable(Dataset):
         return process_transferable_mocap_pred(
             mocap_pred_path=hand_pose_path,
             hand=hand,
+            depth_norm_params=self.depth_norm_params,
+            ori_norm_params=self.ori_norm_params,
             mocap_pred=None,
-            depth_descriptor=self.depth_descriptor,
-            depth_norm_params_path=self.depth_norm_params_path
+            depth_descriptor=self.depth_descriptor
         )
+
+    def count_contact(self):
+        if self.num_cpus == 0 or self.num_cpus == 1:
+            n_pos, n_neg, n_total = self.single_process_count_contact(self.task_names)
+        else:
+            mp_splits, n_data_left, n_cpus_left = [0], len(self), num_cpus
+            while n_data_left:
+                data_assigned = math.ceil(n_data_left / n_cpus_left)
+                n_data_left -= data_assigned
+                n_cpus_left -= 1
+                last_data = mp_splits[-1]
+                mp_splits.append(last_data + data_assigned)
+            args_list = [list(range(mp_splits[i], mp_splits[i + 1])) for i in range(len(mp_splits) - 1)]
+            print(f'Number of processes: {num_cpus}')
+            print(f'Splits for multiprocessing: \n'
+                  f'{[[mp_splits[i], mp_splits[i + 1]] for i in range(len(mp_splits) - 1)]}')
+
+            # multiprocessing (num_cpus processes)
+            pool = mp.Pool(num_cpus)
+            with pool as p:
+                r = list(tqdm(p.imap(self.single_process_count_contact, args_list), total=num_cpus))
+
+            n_pos, n_neg, n_total = 0, 0, 0
+            for process_r in r:
+                process_n_pos, process_n_neg, process_n_total = process_r
+                n_pos += process_n_pos
+                n_neg += process_n_neg
+                n_total += process_n_total
+
+        return n_pos, n_neg, n_total
+
+    def single_process_count_contact(self, indices):
+        n_pos, n_neg, n_total = 0, 0, 0
+        for idx in indices:
+            future_hand_pose_path = self.future_hand_pose_paths[idx]
+            with open(future_hand_pose_path, 'rb') as f:
+               future_hand_info = pickle.load(f)
+            future_contact = future_hand_info['contact_filtered']
+            n_total += 1
+            if future_contact == 1:
+                n_pos += 1
+            else:
+                n_neg += 1
+
+        return n_pos, n_neg, n_total
 
     def __getitem__(self, idx):
         hand_r3m_path = self.r3m_paths[idx]
@@ -662,16 +711,18 @@ class AgentTransferable(Dataset):
 
 if __name__ == '__main__':
     debug = False
-    run_on_cv_server = True
-    num_cpus = 4
+    run_on_cv_server = False
+    num_cpus = 16
     batch_size = 4
-    time_interval = 20
-    test_ss_r3m = True
+    time_interval = 15
+    test_ss_r3m = False
     test_ss_hand_demos_r3m = False
     test_ss_robot_demos_r3m = False
     test_ss_same_hand_demos_r3m = False
     test_franka_hand_demos_r3m = False
-    test_transferable = True
+    test_transferable = False
+    test_count_contact = False
+    count_contact = True
 
     if test_ss_r3m:
         # test SomethingSomethingR3M
@@ -916,7 +967,6 @@ if __name__ == '__main__':
                 break
 
     if test_transferable:
-        # test SomethingSomethingR3M
         if run_on_cv_server:
             task_names = [
                 'push_left',
@@ -935,7 +985,6 @@ if __name__ == '__main__':
                 'pull_right',
                 'push_left',
                 'push_right',
-                'push_slightly'
             ]
             data_home_dir = '/scratch/junyao/Datasets/something_something_processed'
         depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
@@ -972,5 +1021,115 @@ if __name__ == '__main__':
             print(f'future_ori: {data.future_ori}')
             if step == 0:
                 break
+
+    if test_count_contact:
+        if run_on_cv_server:
+            task_names = [
+                'push_left',
+                'push_right',
+                'move_down',
+                'move_up',
+            ]
+            data_home_dir = '/home/junyao/Datasets/something_something_processed'
+        else:
+            task_names = [
+                'move_away',
+                'move_towards',
+                'move_down',
+                'move_up',
+                'pull_left',
+                'pull_right',
+                'push_left',
+                'push_right',
+                'push_slightly'
+            ]
+            data_home_dir = '/scratch/junyao/Datasets/something_something_processed'
+
+        depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
+        ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
+        depth_descriptor = 'scaling_factor'
+
+        depth_norm_params = load_pkl(depth_norm_params_path)[depth_descriptor]
+        ori_norm_params = load_pkl(ori_norm_params_path)
+
+        start = time.time()
+        valid_data = AgentTransferable(
+            data_home_dir=data_home_dir,
+            task_names=task_names,
+            split='valid',
+            time_interval=time_interval,
+            depth_descriptor=depth_descriptor,
+            depth_norm_params=depth_norm_params,
+            ori_norm_params=ori_norm_params,
+            debug=debug,
+            run_on_cv_server=run_on_cv_server,
+            num_cpus=num_cpus
+        )
+        end = time.time()
+        print(f'Loaded valid data. Time: {end - start}')
+        print(f'Number of valid data: {len(valid_data)}')
+
+        n_pos, n_neg, n_total = valid_data.count_contact()
+        print(f'Count contact results:')
+        print(f'Total: {n_total}; Positive: {n_pos}; Negative: {n_neg}')
+
+    if count_contact:
+        if run_on_cv_server:
+            task_names = [
+                'push_left',
+                'push_right',
+                'move_down',
+                'move_up',
+            ]
+            data_home_dir = '/home/junyao/Datasets/something_something_processed'
+        else:
+            task_names = [
+                'move_away',
+                'move_towards',
+                'move_down',
+                'move_up',
+                'pull_left',
+                'pull_right',
+                'push_left',
+                'push_right',
+            ]
+            data_home_dir = '/scratch/junyao/Datasets/something_something_processed'
+
+        depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
+        ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
+        contact_count_path = '/home/junyao/LfHV/frankmocap/ss_utils/contact_count.pkl'
+        depth_descriptor = 'scaling_factor'
+
+        depth_norm_params = load_pkl(depth_norm_params_path)[depth_descriptor]
+        ori_norm_params = load_pkl(ori_norm_params_path)
+
+        contact_count = {'n_pos': 0, 'n_neg': 0, 'n_total': 0}
+        for split in ['train', 'valid']:
+            start = time.time()
+            data = AgentTransferable(
+                data_home_dir=data_home_dir,
+                task_names=task_names,
+                split=split,
+                time_interval=time_interval,
+                depth_descriptor=depth_descriptor,
+                depth_norm_params=depth_norm_params,
+                ori_norm_params=ori_norm_params,
+                debug=debug,
+                run_on_cv_server=run_on_cv_server,
+                num_cpus=num_cpus
+            )
+            end = time.time()
+            print(f'Loaded {split} data. Time: {end - start:.4f}')
+            print(f'Number of {split} data: {len(data)}')
+
+            split_n_pos, split_n_neg, split_n_total = data.count_contact()
+            print(f'Split: {split}; Total: {split_n_total}; Positive: {split_n_pos}; Negative: {split_n_neg}')
+            contact_count['n_total'] += split_n_total
+            contact_count['n_pos'] += split_n_pos
+            contact_count['n_neg'] += split_n_neg
+
+        print(f'contact count: {contact_count}')
+        with open(contact_count_path, 'wb') as f:
+            pickle.dump(contact_count, f)
 
     pass
