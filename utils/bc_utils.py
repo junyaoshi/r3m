@@ -30,8 +30,7 @@ CLUSTER_TASKS = [
     'pull_left',
     'pull_right',
     'push_left',
-    'push_right',
-    'push_slightly'
+    'push_right'
 ]
 
 
@@ -236,20 +235,53 @@ def process_mocap_pred(mocap_pred_path, hand, mocap_pred=None, depth_descriptor=
     )
 
 
+def load_pkl(pkl_path):
+    with open(pkl_path, 'rb') as f:
+        pkl = pickle.load(f)
+    return pkl
+
+
+def zscore_normalize(data, norm_params):
+    if isinstance(data, torch.Tensor):
+        device = data.device
+        if isinstance(norm_params['mean'], np.ndarray):
+            mean = torch.from_numpy(norm_params['mean']).to(device)
+            std = torch.from_numpy(norm_params['std']).to(device)
+        else:
+            mean = torch.tensor(norm_params['mean']).to(device)
+            std = torch.tensor(norm_params['std']).to(device)
+    else:
+        mean = norm_params['mean']
+        std = norm_params['std']
+    return (data - mean) / std
+
+
+def zscore_unnormalize(data, norm_params):
+    if isinstance(data, torch.Tensor):
+        device = data.device
+        if isinstance(norm_params['mean'], np.ndarray):
+            mean = torch.from_numpy(norm_params['mean']).to(device)
+            std = torch.from_numpy(norm_params['std']).to(device)
+        else:
+            mean = torch.tensor(norm_params['mean']).to(device)
+            std = torch.tensor(norm_params['std']).to(device)
+    else:
+        mean = norm_params['mean']
+        std = norm_params['std']
+    return data * std + mean
+
+
 def process_transferable_mocap_pred(
-        mocap_pred_path, hand, mocap_pred=None,
-        depth_descriptor='scaling_factor', depth_norm_params_path=''
+        mocap_pred_path, hand,
+        depth_norm_params, ori_norm_params,
+        mocap_pred=None,
+        depth_descriptor='scaling_factor'
 ):
     assert mocap_pred_path is not None or mocap_pred is not None
     if mocap_pred is None:
         with open(mocap_pred_path, 'rb') as f:
             mocap_pred = pickle.load(f)
     hand_info = mocap_pred
-
-    assert osp.exists(depth_norm_params_path),  f"Depth normalization file {depth_norm_params_path} doesn't exist"
-    with open(depth_norm_params_path, 'rb') as f:
-        depth_norm_params = pickle.load(f)
-    depth_scale = depth_norm_params[depth_descriptor]['scale']
 
     hand_pose = hand_info['pred_output_list'][0][hand]['pred_hand_pose'].reshape(48)
     unnormalized_hand_bbox = hand_info['hand_bbox_list'][0][hand]
@@ -282,8 +314,8 @@ def process_transferable_mocap_pred(
 
     wrist_x_normalized = wrist_x_float / float(img_x)
     wrist_y_normalized = wrist_y_float / float(img_y)
-    hand_depth_normalized = hand_depth_estimate * depth_scale
-    wrist_orientation = hand_pose[:3]
+    hand_depth_normalized = zscore_normalize(hand_depth_estimate, depth_norm_params)
+    wrist_orientation_normalized = zscore_normalize(hand_pose[:3], ori_norm_params)
 
     info = namedtuple('info', [
         'wrist_x_normalized',
@@ -298,7 +330,7 @@ def process_transferable_mocap_pred(
         wrist_x_normalized=wrist_x_normalized,
         wrist_y_normalized=wrist_y_normalized,
         hand_depth_normalized=hand_depth_normalized,
-        wrist_orientation=wrist_orientation,
+        wrist_orientation=wrist_orientation_normalized,
         contact=contact,
         img_shape=img_shape
     )
@@ -386,31 +418,56 @@ def evaluate_transferable_metric_batch(
         task_names, task, device,
         current_x, pred_x,
         current_y, pred_y,
-        current_depth, pred_depth
+        current_depth, pred_depth,
+        evaluate_gt=False, future_x=None, future_y=None, future_depth=None
 ):
-    metric_stats = {task_name: {'total': 0, 'success': 0} for task_name in task_names}
-    all_task_metric = []
+    metric_stats = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
+    all_pred_task_metric = []
     for task_name in task_names:
         if task_name == 'move_away':
-            all_task_metric.append((pred_depth > current_depth).unsqueeze(1))
+            all_pred_task_metric.append((pred_depth > current_depth).unsqueeze(1))
         elif task_name == 'move_towards':
-            all_task_metric.append((pred_depth < current_depth).unsqueeze(1))
+            all_pred_task_metric.append((pred_depth < current_depth).unsqueeze(1))
         elif task_name == 'move_down':
-            all_task_metric.append((pred_y > current_y).unsqueeze(1))
+            all_pred_task_metric.append((pred_y > current_y).unsqueeze(1))
         elif task_name == 'move_up':
-            all_task_metric.append((pred_y < current_y).unsqueeze(1))
+            all_pred_task_metric.append((pred_y < current_y).unsqueeze(1))
         elif task_name == 'pull_left' or task_name == 'push_left':
-            all_task_metric.append((pred_x < current_x).unsqueeze(1))
+            all_pred_task_metric.append((pred_x < current_x).unsqueeze(1))
         elif task_name == 'pull_right' or task_name == 'push_right':
-            all_task_metric.append((pred_x > current_x).unsqueeze(1))
-    all_task_metric = torch.hstack(all_task_metric)
+            all_pred_task_metric.append((pred_x > current_x).unsqueeze(1))
+    all_pred_task_metric = torch.hstack(all_pred_task_metric)
     task_inds = torch.argmax(task, dim=1).to(device)
-    task_metric = all_task_metric.gather(1, task_inds.unsqueeze(1))
+    pred_task_metric = all_pred_task_metric.gather(1, task_inds.unsqueeze(1))
 
-    for ind, metric in zip(task_inds, task_metric):
+    for ind, pred_metric in zip(task_inds, pred_task_metric):
         task_name = task_names[ind]
         metric_stats[task_name]['total'] += 1
-        metric_stats[task_name]['success'] += metric.item()
+        metric_stats[task_name]['pred_success'] += pred_metric.item()
+
+    if evaluate_gt:
+        assert future_x is not None and future_y is not None and future_depth is not None
+        all_gt_task_metric = []
+        for task_name in task_names:
+            if task_name == 'move_away':
+                all_gt_task_metric.append((future_depth > current_depth).unsqueeze(1))
+            elif task_name == 'move_towards':
+                all_gt_task_metric.append((future_depth < current_depth).unsqueeze(1))
+            elif task_name == 'move_down':
+                all_gt_task_metric.append((future_y > current_y).unsqueeze(1))
+            elif task_name == 'move_up':
+                all_gt_task_metric.append((future_y < current_y).unsqueeze(1))
+            elif task_name == 'pull_left' or task_name == 'push_left':
+                all_gt_task_metric.append((future_x < current_x).unsqueeze(1))
+            elif task_name == 'pull_right' or task_name == 'push_right':
+                all_gt_task_metric.append((future_x > current_x).unsqueeze(1))
+        all_gt_task_metric = torch.hstack(all_gt_task_metric)
+        task_inds = torch.argmax(task, dim=1).to(device)
+        gt_task_metric = all_gt_task_metric.gather(1, task_inds.unsqueeze(1))
+
+        for ind, gt_metric in zip(task_inds, gt_task_metric):
+            task_name = task_names[ind]
+            metric_stats[task_name]['gt_success'] += gt_metric.item()
 
     return metric_stats
 
@@ -709,7 +766,7 @@ if __name__ == '__main__':
                 plt.text(b2, t / 2, t, ha='center', fontsize=8)
 
             plt.xlabel('Tasks', fontweight='bold', size=13)
-            plt.ylabel('Count', fontweight='bold', size=13)
+            plt.ylabel('Count', fontweight='bold', size=15)
             plt.xticks([r + bar_width / 2 for r in bar1], list(metric_stats.keys()))
 
             plt.legend()
