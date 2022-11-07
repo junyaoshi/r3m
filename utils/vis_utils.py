@@ -9,7 +9,11 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from utils.bc_utils import unnormalize_bbox, normalize_bbox, evaluate_metric
+from utils.bc_utils import (
+    unnormalize_bbox, normalize_bbox,
+    zscore_normalize, zscore_unnormalize,
+    load_pkl, evaluate_metric
+)
 from utils.depth_utils import scaling_factor_depth
 
 
@@ -209,6 +213,8 @@ def generate_pred_hand_info(
         pred_delta_y,
         pred_delta_depth,
         pred_delta_ori,
+        depth_norm_params,
+        ori_norm_params,
         hand,
         hand_mocap,
         visualizer,
@@ -232,7 +238,8 @@ def generate_pred_hand_info(
 
     # predicted hand info
     pred_hand_bbox_list = deepcopy(current_hand_bbox_list)
-    pred_ori = current_ori + pred_delta_ori
+    pred_ori_normalized = zscore_normalize(current_ori, ori_norm_params) + pred_delta_ori
+    pred_ori = zscore_unnormalize(pred_ori_normalized, ori_norm_params)
     pred_hand_pose = deepcopy(current_hand_pose)
     pred_hand_pose[0, :3] = pred_ori
 
@@ -248,7 +255,8 @@ def generate_pred_hand_info(
     pred_bbox_y_clipped = cur_bbox_y + pred_delta_y_clipped
 
     # process and clip predicted depth
-    pred_depth = current_depth + pred_delta_depth
+    pred_depth_normalized = zscore_normalize(current_depth, depth_norm_params) + pred_delta_depth
+    pred_depth = zscore_unnormalize(pred_depth_normalized, depth_norm_params)
     bbox_scale = current_depth / pred_depth if pred_depth > 0 else np.inf  # larger depth -> smaller bbox
     pred_center_x, pred_center_y = pred_bbox_x_clipped + cur_bbox_w / 2, pred_bbox_y_clipped + cur_bbox_h / 2
 
@@ -257,42 +265,13 @@ def generate_pred_hand_info(
     max_h_scale = (img_h - pred_center_y) / (cur_bbox_h / 2) if pred_center_y > img_center_y \
         else pred_center_y / (cur_bbox_h / 2)
     max_bbox_scale = min(max_w_scale, max_h_scale)
+    max_bbox_scale = min(max_bbox_scale, 50 * current_depth)  # so that pred_depth is lowered bounded by 0.01
     bbox_scale_clipped = min(bbox_scale, max_bbox_scale)
     pred_depth_clipped = current_depth / bbox_scale_clipped
 
     pred_bbox_w_clipped, pred_bbox_h_clipped = cur_bbox_w * bbox_scale_clipped, cur_bbox_h * bbox_scale_clipped
     pred_bbox_x_clipped -= (pred_bbox_w_clipped - cur_bbox_w) / 2
     pred_bbox_y_clipped -= (pred_bbox_h_clipped - cur_bbox_h) / 2
-
-    # # process and clip predicted depth
-    # pred_depth = current_depth + pred_delta_depth
-    # bbox_scale = current_depth / pred_depth if pred_depth > 0 else np.inf # larger depth -> smaller bbox
-    #
-    # max_w_scale = (img_w - cur_center_x) / (cur_bbox_w / 2) if cur_center_x > img_center_x \
-    #     else cur_center_x / (cur_bbox_w / 2)
-    # max_h_scale = (img_h - cur_center_y) / (cur_bbox_h / 2) if cur_center_y > img_center_y \
-    #     else cur_center_y / (cur_bbox_h / 2)
-    # max_bbox_scale = min(max_w_scale, max_h_scale)
-    # bbox_scale_clipped = min(bbox_scale, max_bbox_scale)
-    # pred_depth_clipped = current_depth / bbox_scale_clipped
-    #
-    # pred_bbox_w_clipped, pred_bbox_h_clipped = cur_bbox_w * bbox_scale_clipped, cur_bbox_h * bbox_scale_clipped
-    # pred_bbox_x = cur_bbox_x - (pred_bbox_w_clipped - cur_bbox_w) / 2
-    # pred_bbox_y = cur_bbox_y - (pred_bbox_h_clipped - cur_bbox_h) / 2
-
-    # # process and clip predicted dx and dy
-    # pred_delta_x *= img_w
-    # pred_delta_y *= img_h
-    # pred_wrist_x, pred_wrist_y = current_wrist_x + pred_delta_x, current_wrist_y + pred_delta_y
-    # delta_x_min, delta_x_max = -pred_bbox_x, img_w - (pred_bbox_x + pred_bbox_w_clipped)
-    # delta_y_min, delta_y_max = -pred_bbox_y, img_h - (pred_bbox_y + pred_bbox_h_clipped)
-    # pred_delta_x_clipped = np.clip(pred_delta_x, delta_x_min, delta_x_max)
-    # pred_delta_y_clipped = np.clip(pred_delta_y, delta_y_min, delta_y_max)
-    #
-    # pred_bbox_x_clipped = pred_bbox_x + pred_delta_x_clipped
-    # pred_bbox_y_clipped = pred_bbox_y + pred_delta_y_clipped
-    # pred_bbox_x += pred_delta_x
-    # pred_bbox_y += pred_delta_y
 
     # processed and clipped hand bbox
     pred_hand_bbox = np.array([pred_bbox_x_clipped, pred_bbox_y_clipped, pred_bbox_w_clipped, pred_bbox_h_clipped])
@@ -358,6 +337,8 @@ def generate_transferable_visualization(
         pred_delta_depth,
         pred_delta_ori,  # delta wrist joint rotation, needs to be on Cuda
         pred_contact,
+        depth_norm_params,
+        ori_norm_params,
         task_name,
         visualizer,
         use_visualizer,
@@ -417,6 +398,8 @@ def generate_transferable_visualization(
         pred_delta_y,
         pred_delta_depth,
         pred_delta_ori,
+        depth_norm_params,
+        ori_norm_params,
         hand,
         hand_mocap,
         visualizer,
@@ -460,8 +443,10 @@ def generate_transferable_visualization(
                 future_depth = scaling_factor_depth(future_cam_scale, future_bbox_scale_ratio)
             gt_delta_x = future_wrist_x / float(img_w) - current_wrist_x / float(img_w)
             gt_delta_y = future_wrist_y / float(img_h) - current_wrist_y / float(img_h)
-            gt_delta_depth = future_depth - current_depth
-            gt_delta_ori = torch.from_numpy(future_ori).to(device) - current_ori
+            gt_delta_depth = zscore_normalize(future_depth, depth_norm_params) - \
+                             zscore_normalize(current_depth, depth_norm_params)
+            gt_delta_ori = zscore_normalize(torch.from_numpy(future_ori).to(device), ori_norm_params) - \
+                           zscore_normalize(current_ori, ori_norm_params)
 
             gt_hand_tuple = generate_pred_hand_info(
                 current_hand_info,
@@ -472,6 +457,8 @@ def generate_transferable_visualization(
                 gt_delta_y,
                 gt_delta_depth,
                 gt_delta_ori,
+                depth_norm_params,
+                ori_norm_params,
                 hand,
                 hand_mocap,
                 visualizer,
@@ -546,7 +533,7 @@ def generate_transferable_visualization(
     if has_future_label:
         cur_next_depth_str += f', z next: {future_depth:.2f}'
         if vis_groundtruth:
-            cur_next_depth_str += f', z gt: {int(gt_depth_clipped)}'
+            cur_next_depth_str += f', z gt: {gt_depth_clipped:.2f}'
     cv2.putText(vis_img_bgr, cur_next_depth_str, (header_left_align, next_line), font, text_size, color, thickness, 0)
     next_line += 50
     pred_depth_str = f'z pred: {pred_depth:.2f}, z vis: {pred_depth_clipped:.2f}'
@@ -731,6 +718,12 @@ if __name__ == '__main__':
         hand_mocap = HandMocap(checkpoint_hand, smpl_dir, device='cuda')
         os.chdir(r3m_path)
 
+        depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
+        ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
+        depth_descriptor = 'scaling_factor'
+        depth_norm_params = load_pkl(depth_norm_params_path)[depth_descriptor]
+        ori_norm_params = load_pkl(ori_norm_params_path)
+
         # # right hand test data
         # current_hand_pose_path = '/home/junyao/Datasets/something_something_processed/push_left/valid/mocap_output' \
         #                          '/192254/mocap/frame40_prediction_result.pkl'
@@ -770,8 +763,10 @@ if __name__ == '__main__':
 
         delta_x = future_wrist_x - current_wrist_x
         delta_y = future_wrist_y - current_wrist_y
-        delta_depth = future_depth - current_depth
-        delta_ori = future_ori - current_ori
+        delta_depth = zscore_normalize(future_depth, depth_norm_params) - \
+                      zscore_normalize(current_depth, depth_norm_params)
+        delta_ori = zscore_normalize(future_ori, ori_norm_params) - \
+                    zscore_normalize(current_ori, ori_norm_params)
         # delta_ori = np.array([100, -100, 1000])
         delta_ori = torch.from_numpy(delta_ori).to(device)
         contact = future_hand_info['contact_filtered']
@@ -790,6 +785,8 @@ if __name__ == '__main__':
             # pred_delta_y=-1,
             pred_delta_depth=delta_depth,
             pred_delta_ori=delta_ori,
+            depth_norm_params=depth_norm_params,
+            ori_norm_params=ori_norm_params,
             pred_contact=contact,
             task_name=task_name,
             visualizer=visualizer,
