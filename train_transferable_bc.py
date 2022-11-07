@@ -15,8 +15,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import AgentTransferable
 from utils.bc_utils import (
-    count_parameters_in_M, AvgrageMeter,
-    evaluate_transferable_metric, evaluate_transferable_metric_batch
+    count_parameters_in_M, AvgrageMeter, load_pkl,
+    evaluate_transferable_metric, evaluate_transferable_metric_batch,
+    CV_TASKS, CLUSTER_TASKS
 )
 from bc_models.resnet import EndtoEndNet
 from utils.vis_utils import generate_transferable_visualization
@@ -39,7 +40,7 @@ def parse_args():
                         help="network architecture to use")
 
     # data
-    parser.add_argument('--time_interval', type=int, default=20,
+    parser.add_argument('--time_interval', type=int, default=15,
                         help='how many frames into the future to predict')
     parser.add_argument('--iou_thresh', type=float, default=0.7,
                         help='IoU threshold for filtering the data')
@@ -121,6 +122,12 @@ def parse_args():
     parser.add_argument('--depth_norm_params_path', type=str,
                         default='/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl',
                         help='location of depth normalization params')
+    parser.add_argument('--ori_norm_params_path', type=str,
+                        default='/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl',
+                        help='location of orientation normalization params')
+    parser.add_argument('--contact_count_path', type=str,
+                        default='/home/junyao/LfHV/frankmocap/ss_utils/contact_count.pkl',
+                        help='location of orientation normalization params')
 
     args = parser.parse_args()
     return args
@@ -131,14 +138,14 @@ def main(args):
         args.no_shuffle = True
         args.eval_on_train = True
         args.log_scalar_freq = 1
-        torch.manual_seed(44)
-        np.random.seed(44)
+        torch.manual_seed(5157)
+        np.random.seed(5157)
         assert args.batch_size <= args.sanity_check_size
     args.pred_residual = args.pred_mode == 'residual'
     assert args.vis_sample_size <= args.batch_size
     args.save = join(args.root, args.save)
     assert (args.lambda1 > 0) and (args.lambda2 > 0) and (args.lambda3 > 0) and (args.lambda4 > 0)
-    task_names = os.listdir(args.data_home_dir)
+    task_names = CV_TASKS if args.run_on_cv_server else CLUSTER_TASKS
     args.task_names = task_names
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f'Device: {device}.')
@@ -179,10 +186,17 @@ def main(args):
     print(f'Loaded transferable BC model. Blocks: {args.n_blocks}, Network: {args.net_type}.')
     print(f'param size = {count_parameters_in_M(model)}M')
 
+    # load pkl
+    args.depth_norm_params = load_pkl(args.depth_norm_params_path)[args.depth_descriptor]
+    args.ori_norm_params = load_pkl(args.ori_norm_params_path)
+    args.contact_count = load_pkl(args.contact_count_path)
+    args.bce_pos_weight = args.contact_count['n_neg'] / args.contact_count['n_pos']
+    print(f'Positive Weight for BCE: {args.bce_pos_weight:.4f}')
+
     # optimizer and loss
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     l2_loss_func = nn.MSELoss()
-    bce_loss_func = nn.BCEWithLogitsLoss()
+    bce_loss_func = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(args.bce_pos_weight).to(device))
 
     # create data loaders
     print('Creating data loaders...')
@@ -194,7 +208,8 @@ def main(args):
         iou_thresh=args.iou_thresh,
         time_interval=args.time_interval,
         depth_descriptor=args.depth_descriptor,
-        depth_norm_params_path=args.depth_norm_params_path,
+        depth_norm_params=args.depth_norm_params,
+        ori_norm_params=args.ori_norm_params,
         debug=args.debug,
         run_on_cv_server=args.run_on_cv_server,
         num_cpus=args.num_workers,
@@ -220,7 +235,8 @@ def main(args):
             iou_thresh=args.iou_thresh,
             time_interval=args.time_interval,
             depth_descriptor=args.depth_descriptor,
-            depth_norm_params_path=args.depth_norm_params_path,
+            depth_norm_params=args.depth_norm_params,
+            ori_norm_params=args.ori_norm_params,
             debug=args.debug,
             run_on_cv_server=args.run_on_cv_server,
             num_cpus=args.num_workers,
@@ -264,7 +280,7 @@ def main(args):
         global_step, init_epoch = 0, 1
 
     for epoch in range(init_epoch, args.epochs + 1):
-        print(f'epoch {epoch}')
+        print(f'\nepoch {epoch}')
 
         # Training.
         train_stats = train(
@@ -326,6 +342,7 @@ def train(
     epoch_contact_loss = AvgrageMeter()
     epoch_contact_acc = AvgrageMeter()
 
+    # using current hand info for prediction as baseline
     epoch_bl_loss = AvgrageMeter()
     epoch_bl_xy_loss = AvgrageMeter()
     epoch_bl_depth_loss = AvgrageMeter()
@@ -333,7 +350,15 @@ def train(
     epoch_bl_contact_loss = AvgrageMeter()
     epoch_bl_contact_acc = AvgrageMeter()
 
-    epoch_metric_stats = {task_name: {'total': 0, 'success': 0} for task_name in task_names}
+    # using mean of batch for prediction as baseline
+    epoch_mean_loss = AvgrageMeter()
+    epoch_mean_xy_loss = AvgrageMeter()
+    epoch_mean_depth_loss = AvgrageMeter()
+    epoch_mean_ori_loss = AvgrageMeter()
+    epoch_mean_contact_loss = AvgrageMeter()
+    epoch_mean_contact_acc = AvgrageMeter()
+
+    epoch_metric_stats = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
 
     t0 = time.time()
     for step, data in tqdm(enumerate(train_queue), desc='Going through train data...'):
@@ -375,6 +400,8 @@ def train(
         # process network output
         pred_xy, pred_depth = output[:, 0:2], output[:, 2]
         pred_ori, pred_contact = output[:, 3:6], output[:, 6]
+        if not args.pred_residual:
+            pred_xy = torch.sigmoid(pred_xy)  # force xy to be positive bbox coords
 
         # process loss
         xy_loss = l2_loss_func(pred_xy, target_xy)
@@ -392,6 +419,7 @@ def train(
             contact_acc = pred_contact_correct / pred_contact.size(0)
 
         # process baseline loss
+        batch_size = target_xy.size(0)
         with torch.no_grad():
             bl_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
             bl_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
@@ -407,7 +435,25 @@ def train(
                       args.lambda4 * bl_contact_loss
 
             bl_contact_correct = (current_contact == future_contact).sum().float()
-            bl_contact_acc = bl_contact_correct / current_contact.size(0)
+            bl_contact_acc = bl_contact_correct / batch_size
+
+            mean_xy = torch.mean(target_xy, dim=0).unsqueeze(0).repeat(batch_size, 1)
+            mean_depth = torch.mean(target_depth).repeat(batch_size)
+            mean_ori = torch.mean(target_ori, dim=0).unsqueeze(0).repeat(batch_size, 1)
+            mean_contact = torch.mean(future_contact).repeat(batch_size)
+
+            mean_xy_loss = l2_loss_func(mean_xy, target_xy)
+            mean_depth_loss = l2_loss_func(mean_depth, target_depth)
+            mean_ori_loss = l2_loss_func(mean_ori, target_ori)
+            mean_contact_loss = bce_loss_func(mean_contact, future_contact)
+            mean_loss = args.lambda1 * mean_xy_loss + \
+                        args.lambda2 * mean_depth_loss + \
+                        args.lambda3 * mean_ori_loss + \
+                        args.lambda4 * mean_contact_loss
+
+            mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
+            mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
+            mean_contact_acc = mean_contact_correct / batch_size
 
         # back propogate
         loss.backward()
@@ -420,14 +466,19 @@ def train(
             device=device,
             current_x=current_x,
             pred_x=current_x + pred_xy[:, 0] if args.pred_residual else pred_xy[:, 0],
+            future_x=future_x,
             current_y=current_y,
             pred_y=current_y + pred_xy[:, 1] if args.pred_residual else pred_xy[:, 1],
+            future_y=future_y,
             current_depth=current_depth,
-            pred_depth=current_depth + pred_depth if args.pred_residual else pred_depth
+            pred_depth=current_depth + pred_depth if args.pred_residual else pred_depth,
+            future_depth=future_depth,
+            evaluate_gt=True
         )
         for k, v in metric_stats.items():
             epoch_metric_stats[k]['total'] += v['total']
-            epoch_metric_stats[k]['success'] += v['success']
+            epoch_metric_stats[k]['pred_success'] += v['pred_success']
+            epoch_metric_stats[k]['gt_success'] += v['gt_success']
 
         # update epoch average meters
         epoch_loss.update(loss.data, 1)
@@ -444,6 +495,13 @@ def train(
         epoch_bl_contact_loss.update(bl_contact_loss.data, 1)
         epoch_bl_contact_acc.update(bl_contact_acc.data, 1)
 
+        epoch_mean_loss.update(mean_loss.data, 1)
+        epoch_mean_xy_loss.update(mean_xy_loss.data, 1)
+        epoch_mean_depth_loss.update(mean_depth_loss.data, 1)
+        epoch_mean_ori_loss.update(mean_ori_loss.data, 1)
+        epoch_mean_contact_loss.update(mean_contact_loss.data, 1)
+        epoch_mean_contact_acc.update(mean_contact_acc.data, 1)
+
         # log scalars
         if (global_step + 1) % args.log_scalar_freq == 0:
             writer.add_scalar('train/loss', loss, global_step)
@@ -453,12 +511,19 @@ def train(
             writer.add_scalar('train/contact_loss', contact_loss, global_step)
             writer.add_scalar('train/contact_acc', contact_acc, global_step)
 
-            writer.add_scalar('train_baseline/loss', bl_loss, global_step)
-            writer.add_scalar('train_baseline/xy_loss', bl_xy_loss, global_step)
-            writer.add_scalar('train_baseline/depth_loss', bl_depth_loss, global_step)
-            writer.add_scalar('train_baseline/ori_loss', bl_ori_loss, global_step)
-            writer.add_scalar('train_baseline/contact_loss', bl_contact_loss, global_step)
-            writer.add_scalar('train_baseline/contact_acc', bl_contact_acc, global_step)
+            writer.add_scalar('train_baseline/current_loss', bl_loss, global_step)
+            writer.add_scalar('train_baseline/current_xy_loss', bl_xy_loss, global_step)
+            writer.add_scalar('train_baseline/current_depth_loss', bl_depth_loss, global_step)
+            writer.add_scalar('train_baseline/current_ori_loss', bl_ori_loss, global_step)
+            writer.add_scalar('train_baseline/current_contact_loss', bl_contact_loss, global_step)
+            writer.add_scalar('train_baseline/current_contact_acc', bl_contact_acc, global_step)
+
+            writer.add_scalar('train_baseline/mean_loss', mean_loss, global_step)
+            writer.add_scalar('train_baseline/mean_xy_loss', mean_xy_loss, global_step)
+            writer.add_scalar('train_baseline/mean_depth_loss', mean_depth_loss, global_step)
+            writer.add_scalar('train_baseline/mean_ori_loss', mean_ori_loss, global_step)
+            writer.add_scalar('train_baseline/mean_contact_loss', mean_contact_loss, global_step)
+            writer.add_scalar('train_baseline/mean_contact_acc', mean_contact_acc, global_step)
 
         # log images
         if (global_step + 1) % args.vis_freq == 0 and not args.sanity_check:
@@ -491,15 +556,15 @@ def train(
                     pred_delta_depth=pred_delta_depth.item(),
                     pred_delta_ori=pred_delta_ori,
                     pred_contact=pred_contact_binary[i],
+                    depth_norm_params=args.depth_norm_params,
+                    ori_norm_params=args.ori_norm_params,
                     task_name=task_name,
                     visualizer=visualizer,
                     use_visualizer=args.use_visualizer,
                     hand_mocap=hand_mocap,
                     device=device,
                     log_metric=True,
-                    passed_metric=passed_metric.item(),
-                    current_depth=data.current_depth[i],
-                    future_depth=data.future_depth[i]
+                    passed_metric=passed_metric.item()
                 )
                 vis_imgs.append(vis_img)
             final_vis_img = np.hstack(vis_imgs)
@@ -532,6 +597,8 @@ def train(
                     task_conditioned_output = model(task_conditioned_input)
                     t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
                     t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
+                    if not args.pred_residual:
+                        t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
 
                 task_vis_imgs = []
                 for j, task_name in enumerate(task_names):
@@ -561,6 +628,8 @@ def train(
                         pred_delta_depth=pred_delta_depth.item(),
                         pred_delta_ori=pred_delta_ori,
                         pred_contact=pred_contact_binary,
+                        depth_norm_params=args.depth_norm_params,
+                        ori_norm_params=args.ori_norm_params,
                         task_name=task_name,
                         visualizer=visualizer,
                         use_visualizer=args.use_visualizer,
@@ -568,8 +637,6 @@ def train(
                         device=device,
                         log_metric=True,
                         passed_metric=passed_metric.item(),
-                        current_depth=data.current_depth[i],
-                        future_depth=data.future_depth[i],
                         original_task=task_name == original_task_name
                     )
                     task_vis_imgs.append(task_vis_img)
@@ -583,6 +650,7 @@ def train(
     stats = namedtuple('stats', [
         'loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc',
         'bl_loss', 'bl_xy_loss', 'bl_depth_loss', 'bl_ori_loss', 'bl_contact_loss', 'bl_contact_acc',
+        'mean_loss', 'mean_xy_loss', 'mean_depth_loss', 'mean_ori_loss', 'mean_contact_loss', 'mean_contact_acc',
         'global_step', 'epoch_metric_stats'
     ])
 
@@ -599,6 +667,12 @@ def train(
         bl_ori_loss=epoch_bl_ori_loss.avg,
         bl_contact_loss=epoch_bl_contact_loss.avg,
         bl_contact_acc=epoch_bl_contact_acc.avg,
+        mean_loss=epoch_mean_loss.avg,
+        mean_xy_loss=epoch_mean_xy_loss.avg,
+        mean_depth_loss=epoch_mean_depth_loss.avg,
+        mean_ori_loss=epoch_mean_ori_loss.avg,
+        mean_contact_loss=epoch_mean_contact_loss.avg,
+        mean_contact_acc=epoch_mean_contact_acc.avg,
         global_step=global_step,
         epoch_metric_stats=epoch_metric_stats
     )
@@ -611,7 +685,7 @@ def test(
         visualizer, hand_mocap,
         task_names, args
 ):
-    # model.eval()
+    model.eval()
 
     epoch_loss = AvgrageMeter()
     epoch_xy_loss = AvgrageMeter()
@@ -620,6 +694,7 @@ def test(
     epoch_contact_loss = AvgrageMeter()
     epoch_contact_acc = AvgrageMeter()
 
+    # using current hand info for prediction as baseline
     epoch_bl_loss = AvgrageMeter()
     epoch_bl_xy_loss = AvgrageMeter()
     epoch_bl_depth_loss = AvgrageMeter()
@@ -627,8 +702,16 @@ def test(
     epoch_bl_contact_loss = AvgrageMeter()
     epoch_bl_contact_acc = AvgrageMeter()
 
+    # using mean of batch for prediction as baseline
+    epoch_mean_loss = AvgrageMeter()
+    epoch_mean_xy_loss = AvgrageMeter()
+    epoch_mean_depth_loss = AvgrageMeter()
+    epoch_mean_ori_loss = AvgrageMeter()
+    epoch_mean_contact_loss = AvgrageMeter()
+    epoch_mean_contact_acc = AvgrageMeter()
+
     data, current_x, current_y, current_depth, current_ori = None, None, None, None, None
-    epoch_metric_stats = {task_name: {'total': 0, 'success': 0} for task_name in task_names}
+    epoch_metric_stats = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
     task_metric_stats = None
 
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):
@@ -660,11 +743,14 @@ def test(
         target_depth = future_depth - current_depth if args.pred_residual else future_depth
         target_ori = future_ori - current_ori if args.pred_residual else future_ori
 
+        batch_size = target_xy.size(0)
         with torch.no_grad():
             # forward through model and process output
             output = model(input)
             pred_xy, pred_depth = output[:, 0:2], output[:, 2]
             pred_ori, pred_contact = output[:, 3:6], output[:, 6]
+            if not args.pred_residual:
+                pred_xy = torch.sigmoid(pred_xy)  # force xy to be positive bbox coords
 
             # process loss
             xy_loss = l2_loss_func(pred_xy, target_xy)
@@ -697,6 +783,24 @@ def test(
             bl_contact_correct = (current_contact == future_contact).sum().float()
             bl_contact_acc = bl_contact_correct / current_contact.size(0)
 
+            mean_xy = torch.mean(target_xy, dim=0).unsqueeze(0).repeat(batch_size, 1)
+            mean_depth = torch.mean(target_depth).repeat(batch_size)
+            mean_ori = torch.mean(target_ori, dim=0).unsqueeze(0).repeat(batch_size, 1)
+            mean_contact = torch.mean(future_contact).repeat(batch_size)
+
+            mean_xy_loss = l2_loss_func(mean_xy, target_xy)
+            mean_depth_loss = l2_loss_func(mean_depth, target_depth)
+            mean_ori_loss = l2_loss_func(mean_ori, target_ori)
+            mean_contact_loss = bce_loss_func(mean_contact, future_contact)
+            mean_loss = args.lambda1 * mean_xy_loss + \
+                        args.lambda2 * mean_depth_loss + \
+                        args.lambda3 * mean_ori_loss + \
+                        args.lambda4 * mean_contact_loss
+
+            mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
+            mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
+            mean_contact_acc = mean_contact_correct / batch_size
+
             # process metric evaluation
             metric_stats = evaluate_transferable_metric_batch(
                 task_names=task_names,
@@ -704,14 +808,19 @@ def test(
                 device=device,
                 current_x=current_x,
                 pred_x=current_x + pred_xy[:, 0] if args.pred_residual else pred_xy[:, 0],
+                future_x=future_x,
                 current_y=current_y,
                 pred_y=current_y + pred_xy[:, 1] if args.pred_residual else pred_xy[:, 1],
+                future_y=future_y,
                 current_depth=current_depth,
-                pred_depth=current_depth + pred_depth if args.pred_residual else pred_depth
+                pred_depth=current_depth + pred_depth if args.pred_residual else pred_depth,
+                future_depth=future_depth,
+                evaluate_gt=True
             )
             for k, v in metric_stats.items():
                 epoch_metric_stats[k]['total'] += v['total']
-                epoch_metric_stats[k]['success'] += v['success']
+                epoch_metric_stats[k]['pred_success'] += v['pred_success']
+                epoch_metric_stats[k]['gt_success'] += v['gt_success']
 
         # update epoch average meters
         batch_size = input.size(0)
@@ -728,6 +837,13 @@ def test(
         epoch_bl_ori_loss.update(bl_ori_loss.data, batch_size)
         epoch_bl_contact_loss.update(bl_contact_loss.data, batch_size)
         epoch_bl_contact_acc.update(bl_contact_acc.data, batch_size)
+
+        epoch_mean_loss.update(mean_loss.data, 1)
+        epoch_mean_xy_loss.update(mean_xy_loss.data, 1)
+        epoch_mean_depth_loss.update(mean_depth_loss.data, 1)
+        epoch_mean_ori_loss.update(mean_ori_loss.data, 1)
+        epoch_mean_contact_loss.update(mean_contact_loss.data, 1)
+        epoch_mean_contact_acc.update(mean_contact_acc.data, 1)
 
     # visualize some samples in the batch
     vis_imgs = []
@@ -758,15 +874,15 @@ def test(
             pred_delta_depth=pred_delta_depth.item(),
             pred_delta_ori=pred_delta_ori,
             pred_contact=pred_contact_binary[i],
+            depth_norm_params=args.depth_norm_params,
+            ori_norm_params=args.ori_norm_params,
             task_name=task_name,
             visualizer=visualizer,
             use_visualizer=args.use_visualizer,
             hand_mocap=hand_mocap,
             device=device,
             log_metric=True,
-            passed_metric=passed_metric.item(),
-            current_depth=data.current_depth[i],
-            future_depth=data.future_depth[i]
+            passed_metric=passed_metric.item()
         )
         vis_imgs.append(vis_img)
     final_vis_img = np.hstack(vis_imgs)
@@ -796,6 +912,8 @@ def test(
             task_conditioned_output = model(task_conditioned_input)
             t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
             t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
+            if not args.pred_residual:
+                t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
 
         task_vis_imgs = []
         for j, task_name in enumerate(task_names):
@@ -825,6 +943,8 @@ def test(
                 pred_delta_depth=pred_delta_depth.item(),
                 pred_delta_ori=pred_delta_ori,
                 pred_contact=pred_contact_binary,
+                depth_norm_params=args.depth_norm_params,
+                ori_norm_params=args.ori_norm_params,
                 task_name=task_name,
                 visualizer=visualizer,
                 use_visualizer=args.use_visualizer,
@@ -832,8 +952,6 @@ def test(
                 device=device,
                 log_metric=True,
                 passed_metric=passed_metric.item(),
-                current_depth=data.current_depth[i],
-                future_depth=data.future_depth[i],
                 original_task=task_name == original_task_name
             )
             task_vis_imgs.append(task_vis_img)
@@ -843,7 +961,7 @@ def test(
     # evaluate task conditioning on last batch
     if args.eval_tasks:
         data = next(iter(valid_queue))
-        task_metric_stats = {task_name: {'total': 0, 'success': 0} for task_name in task_names}
+        task_metric_stats = {task_name: {'total': 0, 'pred_success': 0} for task_name in task_names}
         all_task_instances = []
         for j, task_name in enumerate(task_names):
             task_instance = torch.zeros(1, len(task_names))
@@ -879,15 +997,17 @@ def test(
                 current_y=t_current_y,
                 pred_y=t_current_y + t_pred_xy[:, 1] if args.pred_residual else t_pred_xy[:, 1],
                 current_depth=t_current_depth,
-                pred_depth=t_current_depth + t_pred_depth if args.pred_residual else t_pred_depth
+                pred_depth=t_current_depth + t_pred_depth if args.pred_residual else t_pred_depth,
+                evaluate_gt=False
             )
             for k, v in metric_stats.items():
                 task_metric_stats[k]['total'] += v['total']
-                task_metric_stats[k]['success'] += v['success']
+                task_metric_stats[k]['pred_success'] += v['pred_success']
 
     stats = namedtuple('stats', [
         'loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc',
         'bl_loss', 'bl_xy_loss', 'bl_depth_loss', 'bl_ori_loss', 'bl_contact_loss', 'bl_contact_acc',
+        'mean_loss', 'mean_xy_loss', 'mean_depth_loss', 'mean_ori_loss', 'mean_contact_loss', 'mean_contact_acc',
         'epoch_metric_stats', 'task_metric_stats'
     ])
 
@@ -904,6 +1024,12 @@ def test(
         bl_ori_loss=epoch_bl_ori_loss.avg,
         bl_contact_loss=epoch_bl_contact_loss.avg,
         bl_contact_acc=epoch_bl_contact_acc.avg,
+        mean_loss=epoch_mean_loss.avg,
+        mean_xy_loss=epoch_mean_xy_loss.avg,
+        mean_depth_loss=epoch_mean_depth_loss.avg,
+        mean_ori_loss=epoch_mean_ori_loss.avg,
+        mean_contact_loss=epoch_mean_contact_loss.avg,
+        mean_contact_acc=epoch_mean_contact_acc.avg,
         epoch_metric_stats=epoch_metric_stats,
         task_metric_stats=task_metric_stats
     )
@@ -929,12 +1055,19 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     writer.add_scalar(f'{mode}_epoch/contact_loss', stats.contact_loss, epoch)
     writer.add_scalar(f'{mode}_epoch/contact_acc', stats.contact_acc, epoch)
 
-    writer.add_scalar(f'{mode}_epoch_baseline/loss', stats.bl_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/xy_loss', stats.bl_xy_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/depth_loss', stats.bl_depth_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/ori_loss', stats.bl_ori_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/contact_loss', stats.bl_contact_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/contact_acc', stats.bl_contact_acc, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/current_loss', stats.bl_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/current_xy_loss', stats.bl_xy_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/current_depth_loss', stats.bl_depth_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/current_ori_loss', stats.bl_ori_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/current_contact_loss', stats.bl_contact_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/current_contact_acc', stats.bl_contact_acc, epoch)
+
+    writer.add_scalar(f'{mode}_epoch_baseline/mean_loss', stats.mean_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/mean_xy_loss', stats.mean_xy_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/mean_depth_loss', stats.mean_depth_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/mean_ori_loss', stats.mean_ori_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/mean_contact_loss', stats.mean_contact_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline/mean_contact_acc', stats.mean_contact_acc, epoch)
 
     if train:
         writer.add_scalar('stats/epoch_steps', global_step, epoch)
@@ -942,42 +1075,62 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         writer.add_scalar('stats/lambda2', args.lambda2, epoch)
         writer.add_scalar('stats/lambda3', args.lambda3, epoch)
         writer.add_scalar('stats/lambda4', args.lambda4, epoch)
+        writer.add_scalar('stats/bce_pos_weight', args.bce_pos_weight, epoch)
 
     # visualize metric evaluation success rate by bar plot
-    fig = plt.figure(figsize=(10, 7))
-    epoch_success_rate = [
-        v['success'] / v['total'] if v['total'] != 0 else 0
+    bar_width = 0.4
+    fig_height = 10
+    n_task = len(args.task_names)
+
+    fig = plt.figure(figsize=(2 * n_task , fig_height))
+    bar1 = np.arange(len(metric_stats))
+    bar2 = [x + bar_width for x in bar1]
+    epoch_pred_success_rate = [
+        v['pred_success'] / v['total'] if v['total'] != 0 else 0
         for v in metric_stats.values()
     ]
-    plt.bar(list(metric_stats.keys()), epoch_success_rate, width=0.7, color='skyblue')
-    for i, r in enumerate(epoch_success_rate):
-        plt.text(i, r / 2, f'{r:.2f}', ha='center', fontsize=15)
+    epoch_gt_success_rate = [
+        v['gt_success'] / v['total'] if v['total'] != 0 else 0
+        for v in metric_stats.values()
+    ]
+
+    plt.bar(bar1, epoch_pred_success_rate, width=bar_width, color='peachpuff', label='pred')
+    plt.bar(bar2, epoch_gt_success_rate, width=bar_width, color='lavender', label='gt')
+    for b1, ps, b2, gs in zip(bar1, epoch_pred_success_rate, bar2, epoch_gt_success_rate):
+        plt.text(b1, ps / 2, f'{ps:.2f}', ha='center', fontsize=13)
+        plt.text(b2, gs / 2, f'{gs:.2f}', ha='center', fontsize=13)
     plt.xlabel('Tasks', fontweight='bold', size=13)
     plt.ylabel('Success rate', fontweight='bold', size=13)
+    plt.xticks([r + bar_width / 2 for r in bar1], list(metric_stats.keys()))
     plt.ylim([0, 1])
     plt.title('1D Metric Evaluation')
+    plt.legend()
     plt.tight_layout()
     writer.add_figure(f'{mode}_metric/success_rate', fig, epoch)
     plt.close(fig)
 
     # visualize metric evaluation count by bar plot
-    bar_width = 0.35
-    fig = plt.figure(figsize=(10, 7))
-
-    success = [v['success'] for v in metric_stats.values()]
+    bar_width = 0.25
+    fig = plt.figure(figsize=(3 * n_task, fig_height))
+    pred_success = [v['pred_success'] for v in metric_stats.values()]
+    gt_success = [v['gt_success'] for v in metric_stats.values()]
     total = [v['total'] for v in metric_stats.values()]
     bar1 = np.arange(len(metric_stats))
     bar2 = [x + bar_width for x in bar1]
+    bar3 = [x + bar_width for x in bar2]
 
-    plt.bar(bar1, success, color='peachpuff', width=bar_width, label='success')
-    plt.bar(bar2, total, color='lavender', width=bar_width, label='total')
-    for b1, s, b2, t in zip(bar1, success, bar2, total):
-        plt.text(b1, s / 2, s, ha='center', fontsize=8)
-        plt.text(b2, t / 2, t, ha='center', fontsize=8)
+    plt.bar(bar1, pred_success, color='peachpuff', width=bar_width, label='pred success')
+    plt.bar(bar2, gt_success, color='lavender', width=bar_width, label='gt success')
+    plt.bar(bar3, total, color='skyblue', width=bar_width, label='total')
+    for b1, ps, b2, gs, b3, t in zip(bar1, pred_success, bar2, gt_success, bar3, total):
+        plt.text(b1, ps / 2, ps, ha='center', fontsize=8)
+        plt.text(b2, gs / 2, gs, ha='center', fontsize=8)
+        plt.text(b3, t / 2, t, ha='center', fontsize=8)
 
     plt.xlabel('Tasks', fontweight='bold', size=13)
     plt.ylabel('Count', fontweight='bold', size=13)
-    plt.xticks([r + bar_width / 2 for r in bar1], list(metric_stats.keys()))
+    plt.xticks([r + bar_width for r in bar1], list(metric_stats.keys()))
+    plt.title('1D Metric Evaluation')
     plt.legend()
     plt.tight_layout()
     writer.add_figure(f'{mode}_metric/count', fig, epoch)
@@ -985,12 +1138,13 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
 
     if not train and args.eval_tasks:
         # visualize metric evaluation success rate by bar plot
-        fig = plt.figure(figsize=(10, 7))
+        bar_width = 0.7
+        fig = plt.figure(figsize=(1 * n_task, fig_height))
         epoch_success_rate = [
-            v['success'] / v['total'] if v['total'] != 0 else 0
+            v['pred_success'] / v['total'] if v['total'] != 0 else 0
             for v in task_metric_stats.values()
         ]
-        plt.bar(list(task_metric_stats.keys()), epoch_success_rate, width=0.7, color='skyblue')
+        plt.bar(list(task_metric_stats.keys()), epoch_success_rate, width=bar_width, color='skyblue')
         for i, r in enumerate(epoch_success_rate):
             plt.text(i, r / 2, f'{r:.2f}', ha='center', fontsize=15)
         plt.xlabel('Tasks', fontweight='bold', size=13)
@@ -1003,9 +1157,9 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
 
         # visualize metric evaluation count by bar plot
         bar_width = 0.35
-        fig = plt.figure(figsize=(10, 7))
+        fig = plt.figure(figsize=(2 * n_task, fig_height))
 
-        success = [v['success'] for v in task_metric_stats.values()]
+        success = [v['pred_success'] for v in task_metric_stats.values()]
         total = [v['total'] for v in task_metric_stats.values()]
         bar1 = np.arange(len(task_metric_stats))
         bar2 = [x + bar_width for x in bar1]
