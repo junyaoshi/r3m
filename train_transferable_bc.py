@@ -448,6 +448,8 @@ def train(
         # process baseline loss
         batch_size = target_xy.size(0)
         with torch.no_grad():
+            loss_unweighted = xy_loss + depth_loss + ori_loss + contact_loss
+
             cur_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
             cur_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
             cur_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
@@ -460,6 +462,7 @@ def train(
                        args.lambda2 * cur_depth_loss + \
                        args.lambda3 * cur_ori_loss + \
                        args.lambda4 * cur_contact_loss
+            cur_loss_unweighted = cur_xy_loss + cur_depth_loss + cur_ori_loss + cur_contact_loss
 
             cur_contact_correct = (current_contact == future_contact).sum().float()
             cur_contact_acc = cur_contact_correct / batch_size
@@ -483,6 +486,7 @@ def train(
                         args.lambda2 * mean_depth_loss + \
                         args.lambda3 * mean_ori_loss + \
                         args.lambda4 * mean_contact_loss
+            mean_loss_unweighted = mean_xy_loss + mean_depth_loss + mean_ori_loss + mean_contact_loss
 
             mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
             mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
@@ -520,21 +524,21 @@ def train(
             epoch_metric_stats[k]['gt_success'] += v['gt_success']
 
         # update epoch average meters
-        epoch_loss.update(loss.data, 1)
+        epoch_loss.update(loss_unweighted.data, 1)
         epoch_xy_loss.update(xy_loss.data, 1)
         epoch_depth_loss.update(depth_loss.data, 1)
         epoch_ori_loss.update(ori_loss.data, 1)
         epoch_contact_loss.update(contact_loss.data, 1)
         epoch_contact_acc.update(contact_acc.data, 1)
 
-        epoch_cur_loss.update(cur_loss.data, 1)
+        epoch_cur_loss.update(cur_loss_unweighted.data, 1)
         epoch_cur_xy_loss.update(cur_xy_loss.data, 1)
         epoch_cur_depth_loss.update(cur_depth_loss.data, 1)
         epoch_cur_ori_loss.update(cur_ori_loss.data, 1)
         epoch_cur_contact_loss.update(cur_contact_loss.data, 1)
         epoch_cur_contact_acc.update(cur_contact_acc.data, 1)
 
-        epoch_mean_loss.update(mean_loss.data, 1)
+        epoch_mean_loss.update(mean_loss_unweighted.data, 1)
         epoch_mean_xy_loss.update(mean_xy_loss.data, 1)
         epoch_mean_depth_loss.update(mean_depth_loss.data, 1)
         epoch_mean_ori_loss.update(mean_ori_loss.data, 1)
@@ -543,21 +547,21 @@ def train(
 
         # log scalars
         if (global_step + 1) % args.log_scalar_freq == 0:
-            writer.add_scalar('train/loss', loss, global_step)
+            writer.add_scalar('train/loss', loss_unweighted, global_step)
             writer.add_scalar('train/xy_loss', xy_loss, global_step)
             writer.add_scalar('train/depth_loss', depth_loss, global_step)
             writer.add_scalar('train/ori_loss', ori_loss, global_step)
             writer.add_scalar('train/contact_loss', contact_loss, global_step)
             writer.add_scalar('train/contact_acc', contact_acc, global_step)
 
-            writer.add_scalar('train_baseline_current/loss', cur_loss, global_step)
+            writer.add_scalar('train_baseline_current/loss', cur_loss_unweighted, global_step)
             writer.add_scalar('train_baseline_current/xy_loss', cur_xy_loss, global_step)
             writer.add_scalar('train_baseline_current/depth_loss', cur_depth_loss, global_step)
             writer.add_scalar('train_baseline_current/ori_loss', cur_ori_loss, global_step)
             writer.add_scalar('train_baseline_current/contact_loss', cur_contact_loss, global_step)
             writer.add_scalar('train_baseline_current/contact_acc', cur_contact_acc, global_step)
 
-            writer.add_scalar('train_baseline_mean/loss', mean_loss, global_step)
+            writer.add_scalar('train_baseline_mean/loss', mean_loss_unweighted, global_step)
             writer.add_scalar('train_baseline_mean/xy_loss', mean_xy_loss, global_step)
             writer.add_scalar('train_baseline_mean/depth_loss', mean_depth_loss, global_step)
             writer.add_scalar('train_baseline_mean/ori_loss', mean_ori_loss, global_step)
@@ -807,6 +811,7 @@ def test(
                    args.lambda2 * depth_loss + \
                    args.lambda3 * ori_loss + \
                    args.lambda4 * contact_loss
+            loss_unweighted = xy_loss + depth_loss + ori_loss + contact_loss
 
             pred_contact_binary = torch.round(torch.sigmoid(pred_contact))
             pred_contact_correct = (pred_contact_binary == future_contact).sum().float()
@@ -836,6 +841,7 @@ def test(
                        args.lambda2 * cur_depth_loss + \
                        args.lambda3 * cur_ori_loss + \
                        args.lambda4 * cur_contact_loss
+            cur_loss_unweighted = cur_xy_loss + cur_depth_loss + cur_ori_loss + cur_contact_loss
 
             cur_contact_correct = (current_contact == future_contact).sum().float()
             cur_contact_acc = cur_contact_correct / current_contact.size(0)
@@ -859,6 +865,7 @@ def test(
                         args.lambda2 * mean_depth_loss + \
                         args.lambda3 * mean_ori_loss + \
                         args.lambda4 * mean_contact_loss
+            mean_loss_unweighted = mean_xy_loss + mean_depth_loss + mean_ori_loss + mean_contact_loss
 
             mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
             mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
@@ -893,21 +900,21 @@ def test(
 
         # update epoch average meters
         batch_size = input.size(0)
-        epoch_loss.update(loss.data, batch_size)
+        epoch_loss.update(loss_unweighted.data, batch_size)
         epoch_xy_loss.update(xy_loss.data, batch_size)
         epoch_depth_loss.update(depth_loss.data, batch_size)
         epoch_ori_loss.update(ori_loss.data, batch_size)
         epoch_contact_loss.update(contact_loss.data, batch_size)
         epoch_contact_acc.update(contact_acc.data, batch_size)
 
-        epoch_cur_loss.update(cur_loss.data, batch_size)
+        epoch_cur_loss.update(cur_loss_unweighted.data, batch_size)
         epoch_cur_xy_loss.update(cur_xy_loss.data, batch_size)
         epoch_cur_depth_loss.update(cur_depth_loss.data, batch_size)
         epoch_cur_ori_loss.update(cur_ori_loss.data, batch_size)
         epoch_cur_contact_loss.update(cur_contact_loss.data, batch_size)
         epoch_cur_contact_acc.update(cur_contact_acc.data, batch_size)
 
-        epoch_mean_loss.update(mean_loss.data, 1)
+        epoch_mean_loss.update(mean_loss_unweighted.data, 1)
         epoch_mean_xy_loss.update(mean_xy_loss.data, 1)
         epoch_mean_depth_loss.update(mean_depth_loss.data, 1)
         epoch_mean_ori_loss.update(mean_ori_loss.data, 1)
