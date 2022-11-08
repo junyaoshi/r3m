@@ -506,7 +506,7 @@ class AgentTransferable(Dataset):
         else:
             print(f'Initializing dataset.')
         if split is not None:
-            print(f'Split: {"train" if split else "valid"}')
+            print(f'Split: {"train" if split == "train" else "valid"}')
 
         (
             self.r3m_paths, self.tasks, self.hands,
@@ -714,7 +714,7 @@ if __name__ == '__main__':
     run_on_cv_server = False
     num_cpus = 16
     batch_size = 4
-    time_interval = 15
+    time_interval = 10
     test_ss_r3m = False
     test_ss_hand_demos_r3m = False
     test_ss_robot_demos_r3m = False
@@ -1097,7 +1097,7 @@ if __name__ == '__main__':
 
         depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
         ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
-        contact_count_path = '/home/junyao/LfHV/frankmocap/ss_utils/contact_count.pkl'
+        contact_count_path = f'/home/junyao/LfHV/frankmocap/ss_utils/contact_count_t={time_interval}.pkl'
         depth_descriptor = 'scaling_factor'
 
         depth_norm_params = load_pkl(depth_norm_params_path)[depth_descriptor]
