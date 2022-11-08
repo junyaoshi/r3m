@@ -126,8 +126,8 @@ def parse_args():
     parser.add_argument('--ori_norm_params_path', type=str,
                         default='/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl',
                         help='location of orientation normalization params')
-    parser.add_argument('--contact_count_path', type=str,
-                        default='/home/junyao/LfHV/frankmocap/ss_utils/contact_count.pkl',
+    parser.add_argument('--contact_count_dir', type=str,
+                        default='/home/junyao/LfHV/frankmocap/ss_utils',
                         help='location of orientation normalization params')
 
     args = parser.parse_args()
@@ -191,6 +191,7 @@ def main(args):
     # load pkl
     args.depth_norm_params = load_pkl(args.depth_norm_params_path)[args.depth_descriptor]
     args.ori_norm_params = load_pkl(args.ori_norm_params_path)
+    args.contact_count_path = join(args.contact_count_dir, f'contact_count_t={args.time_interval}.pkl')
     args.contact_count = load_pkl(args.contact_count_path)
     args.bce_pos_weight = args.contact_count['n_neg'] / args.contact_count['n_pos']
     print(f'Positive Weight for BCE: {args.bce_pos_weight:.4f}')
@@ -1134,7 +1135,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     n_task = len(args.task_names)
 
     fig = plt.figure(figsize=(2 * n_task , fig_height))
-    bar1 = np.arange(len(metric_stats))
+    bar1 = np.arange(len(metric_stats) + 1)
     bar2 = [x + bar_width for x in bar1]
     epoch_pred_success_rate = [
         v['pred_success'] / v['total'] if v['total'] != 0 else 0
@@ -1144,6 +1145,11 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         v['gt_success'] / v['total'] if v['total'] != 0 else 0
         for v in metric_stats.values()
     ]
+    total_sum = sum([v['total'] for v in metric_stats.values()])
+    pred_success_sum = sum([v['pred_success'] for v in metric_stats.values()])
+    gt_success_sum = sum([v['gt_success'] for v in metric_stats.values()])
+    epoch_pred_success_rate.append(pred_success_sum / total_sum if total_sum != 0 else 0)
+    epoch_gt_success_rate.append(gt_success_sum / total_sum if total_sum != 0 else 0)
 
     plt.bar(bar1, epoch_pred_success_rate, width=bar_width, color='peachpuff', label='pred')
     plt.bar(bar2, epoch_gt_success_rate, width=bar_width, color='lavender', label='gt')
@@ -1152,7 +1158,9 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         plt.text(b2, gs / 2, f'{gs:.2f}', ha='center', fontsize=13)
     plt.xlabel('Tasks', fontweight='bold', size=13)
     plt.ylabel('Success rate', fontweight='bold', size=13)
-    plt.xticks([r + bar_width / 2 for r in bar1], list(metric_stats.keys()))
+    xticks = list(metric_stats.keys())
+    xticks.append('total')
+    plt.xticks([r + bar_width / 2 for r in bar1], xticks)
     plt.ylim([0, 1])
     plt.title('1D Metric Evaluation')
     plt.legend()
@@ -1196,7 +1204,12 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
             v['pred_success'] / v['total'] if v['total'] != 0 else 0
             for v in task_metric_stats.values()
         ]
-        plt.bar(list(task_metric_stats.keys()), epoch_success_rate, width=bar_width, color='skyblue')
+        total_sum = sum([v['total'] for v in task_metric_stats.values()])
+        pred_success_sum = sum([v['pred_success'] for v in task_metric_stats.values()])
+        epoch_success_rate.append(pred_success_sum / total_sum if total_sum != 0 else 0)
+        xticks = list(task_metric_stats.keys())
+        xticks.append('total')
+        plt.bar(xticks, epoch_success_rate, width=bar_width, color='skyblue')
         for i, r in enumerate(epoch_success_rate):
             plt.text(i, r / 2, f'{r:.2f}', ha='center', fontsize=15)
         plt.xlabel('Tasks', fontweight='bold', size=13)
