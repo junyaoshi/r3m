@@ -357,12 +357,12 @@ def train(
     epoch_contact_acc = AvgrageMeter()
 
     # using current hand info for prediction as baseline
-    epoch_bl_loss = AvgrageMeter()
-    epoch_bl_xy_loss = AvgrageMeter()
-    epoch_bl_depth_loss = AvgrageMeter()
-    epoch_bl_ori_loss = AvgrageMeter()
-    epoch_bl_contact_loss = AvgrageMeter()
-    epoch_bl_contact_acc = AvgrageMeter()
+    epoch_cur_loss = AvgrageMeter()
+    epoch_cur_xy_loss = AvgrageMeter()
+    epoch_cur_depth_loss = AvgrageMeter()
+    epoch_cur_ori_loss = AvgrageMeter()
+    epoch_cur_contact_loss = AvgrageMeter()
+    epoch_cur_contact_acc = AvgrageMeter()
 
     # using mean of batch for prediction as baseline
     epoch_mean_loss = AvgrageMeter()
@@ -373,6 +373,7 @@ def train(
     epoch_mean_contact_acc = AvgrageMeter()
 
     epoch_metric_stats = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
+    contact_stats = {c: {'gt': 0, 'pred': 0, 'bl_cur': 0, 'bl_mean': 0} for c in ['pos', 'neg']}
 
     t0 = time.time()
     for step, data in tqdm(enumerate(train_queue), desc='Going through train data...'):
@@ -432,24 +433,41 @@ def train(
             pred_contact_correct = (pred_contact_binary == future_contact).sum().float()
             contact_acc = pred_contact_correct / pred_contact.size(0)
 
+            pos_inds, neg_inds = future_contact == 1, future_contact == 0
+            pred_contact_pos, pred_contact_neg = pred_contact_binary[pos_inds], pred_contact_binary[neg_inds]
+            future_contact_pos, future_contact_neg = future_contact[pos_inds], future_contact[neg_inds]
+            n_pos, n_neg = future_contact_pos.size(0), future_contact_neg.size(0)
+            pred_n_pos = (pred_contact_pos == future_contact_pos).sum().item()
+            pred_n_neg = (pred_contact_neg == future_contact_neg).sum().item()
+            contact_stats['pos']['gt'] += n_pos
+            contact_stats['neg']['gt'] += n_neg
+            contact_stats['pos']['pred'] += pred_n_pos
+            contact_stats['neg']['pred'] += pred_n_neg
+
         # process baseline loss
         batch_size = target_xy.size(0)
         with torch.no_grad():
-            bl_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
-            bl_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
-            bl_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
+            cur_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
+            cur_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
+            cur_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
 
-            bl_xy_loss = l2_loss_func(bl_xy, target_xy)
-            bl_depth_loss = l2_loss_func(bl_depth, target_depth)
-            bl_ori_loss = l2_loss_func(bl_ori, target_ori)
-            bl_contact_loss = bce_loss_func(current_contact, future_contact)
-            bl_loss = args.lambda1 * bl_xy_loss + \
-                      args.lambda2 * bl_depth_loss + \
-                      args.lambda3 * bl_ori_loss + \
-                      args.lambda4 * bl_contact_loss
+            cur_xy_loss = l2_loss_func(cur_xy, target_xy)
+            cur_depth_loss = l2_loss_func(cur_depth, target_depth)
+            cur_ori_loss = l2_loss_func(cur_ori, target_ori)
+            cur_contact_loss = bce_loss_func(current_contact, future_contact)
+            cur_loss = args.lambda1 * cur_xy_loss + \
+                       args.lambda2 * cur_depth_loss + \
+                       args.lambda3 * cur_ori_loss + \
+                       args.lambda4 * cur_contact_loss
 
-            bl_contact_correct = (current_contact == future_contact).sum().float()
-            bl_contact_acc = bl_contact_correct / batch_size
+            cur_contact_correct = (current_contact == future_contact).sum().float()
+            cur_contact_acc = cur_contact_correct / batch_size
+
+            cur_pred_contact_pos, cur_pred_contact_neg = current_contact[pos_inds], current_contact[neg_inds]
+            cur_n_pos = (cur_pred_contact_pos == future_contact_pos).sum().item()
+            cur_n_neg = (cur_pred_contact_neg == future_contact_neg).sum().item()
+            contact_stats['pos']['bl_cur'] += cur_n_pos
+            contact_stats['neg']['bl_cur'] += cur_n_neg
 
             mean_xy = torch.mean(target_xy, dim=0).unsqueeze(0).repeat(batch_size, 1)
             mean_depth = torch.mean(target_depth).repeat(batch_size)
@@ -468,6 +486,12 @@ def train(
             mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
             mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
             mean_contact_acc = mean_contact_correct / batch_size
+
+            mean_pred_contact_pos, mean_pred_contact_neg = mean_contact_binary[pos_inds], mean_contact_binary[neg_inds]
+            mean_n_pos = (mean_pred_contact_pos == future_contact_pos).sum().item()
+            mean_n_neg = (mean_pred_contact_neg == future_contact_neg).sum().item()
+            contact_stats['pos']['bl_mean'] += mean_n_pos
+            contact_stats['neg']['bl_mean'] += mean_n_neg
 
         # back propogate
         loss.backward()
@@ -502,12 +526,12 @@ def train(
         epoch_contact_loss.update(contact_loss.data, 1)
         epoch_contact_acc.update(contact_acc.data, 1)
 
-        epoch_bl_loss.update(bl_loss.data, 1)
-        epoch_bl_xy_loss.update(bl_xy_loss.data, 1)
-        epoch_bl_depth_loss.update(bl_depth_loss.data, 1)
-        epoch_bl_ori_loss.update(bl_ori_loss.data, 1)
-        epoch_bl_contact_loss.update(bl_contact_loss.data, 1)
-        epoch_bl_contact_acc.update(bl_contact_acc.data, 1)
+        epoch_cur_loss.update(cur_loss.data, 1)
+        epoch_cur_xy_loss.update(cur_xy_loss.data, 1)
+        epoch_cur_depth_loss.update(cur_depth_loss.data, 1)
+        epoch_cur_ori_loss.update(cur_ori_loss.data, 1)
+        epoch_cur_contact_loss.update(cur_contact_loss.data, 1)
+        epoch_cur_contact_acc.update(cur_contact_acc.data, 1)
 
         epoch_mean_loss.update(mean_loss.data, 1)
         epoch_mean_xy_loss.update(mean_xy_loss.data, 1)
@@ -525,19 +549,19 @@ def train(
             writer.add_scalar('train/contact_loss', contact_loss, global_step)
             writer.add_scalar('train/contact_acc', contact_acc, global_step)
 
-            writer.add_scalar('train_baseline/current_loss', bl_loss, global_step)
-            writer.add_scalar('train_baseline/current_xy_loss', bl_xy_loss, global_step)
-            writer.add_scalar('train_baseline/current_depth_loss', bl_depth_loss, global_step)
-            writer.add_scalar('train_baseline/current_ori_loss', bl_ori_loss, global_step)
-            writer.add_scalar('train_baseline/current_contact_loss', bl_contact_loss, global_step)
-            writer.add_scalar('train_baseline/current_contact_acc', bl_contact_acc, global_step)
+            writer.add_scalar('train_baseline_current/loss', cur_loss, global_step)
+            writer.add_scalar('train_baseline_current/xy_loss', cur_xy_loss, global_step)
+            writer.add_scalar('train_baseline_current/depth_loss', cur_depth_loss, global_step)
+            writer.add_scalar('train_baseline_current/ori_loss', cur_ori_loss, global_step)
+            writer.add_scalar('train_baseline_current/contact_loss', cur_contact_loss, global_step)
+            writer.add_scalar('train_baseline_current/contact_acc', cur_contact_acc, global_step)
 
-            writer.add_scalar('train_baseline/mean_loss', mean_loss, global_step)
-            writer.add_scalar('train_baseline/mean_xy_loss', mean_xy_loss, global_step)
-            writer.add_scalar('train_baseline/mean_depth_loss', mean_depth_loss, global_step)
-            writer.add_scalar('train_baseline/mean_ori_loss', mean_ori_loss, global_step)
-            writer.add_scalar('train_baseline/mean_contact_loss', mean_contact_loss, global_step)
-            writer.add_scalar('train_baseline/mean_contact_acc', mean_contact_acc, global_step)
+            writer.add_scalar('train_baseline_mean/loss', mean_loss, global_step)
+            writer.add_scalar('train_baseline_mean/xy_loss', mean_xy_loss, global_step)
+            writer.add_scalar('train_baseline_mean/depth_loss', mean_depth_loss, global_step)
+            writer.add_scalar('train_baseline_mean/ori_loss', mean_ori_loss, global_step)
+            writer.add_scalar('train_baseline_mean/contact_loss', mean_contact_loss, global_step)
+            writer.add_scalar('train_baseline_mean/contact_acc', mean_contact_acc, global_step)
 
         # log images
         if (global_step + 1) % args.vis_freq == 0 and not args.sanity_check:
@@ -667,9 +691,9 @@ def train(
 
     stats = namedtuple('stats', [
         'loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc',
-        'bl_loss', 'bl_xy_loss', 'bl_depth_loss', 'bl_ori_loss', 'bl_contact_loss', 'bl_contact_acc',
+        'cur_loss', 'cur_xy_loss', 'cur_depth_loss', 'cur_ori_loss', 'cur_contact_loss', 'cur_contact_acc',
         'mean_loss', 'mean_xy_loss', 'mean_depth_loss', 'mean_ori_loss', 'mean_contact_loss', 'mean_contact_acc',
-        'global_step', 'epoch_metric_stats'
+        'global_step', 'epoch_metric_stats', 'task_metric_stats', 'contact_stats'
     ])
 
     return stats(
@@ -679,12 +703,12 @@ def train(
         ori_loss=epoch_ori_loss.avg,
         contact_loss=epoch_contact_loss.avg,
         contact_acc=epoch_contact_acc.avg,
-        bl_loss=epoch_bl_loss.avg,
-        bl_xy_loss=epoch_bl_xy_loss.avg,
-        bl_depth_loss=epoch_bl_depth_loss.avg,
-        bl_ori_loss=epoch_bl_ori_loss.avg,
-        bl_contact_loss=epoch_bl_contact_loss.avg,
-        bl_contact_acc=epoch_bl_contact_acc.avg,
+        cur_loss=epoch_cur_loss.avg,
+        cur_xy_loss=epoch_cur_xy_loss.avg,
+        cur_depth_loss=epoch_cur_depth_loss.avg,
+        cur_ori_loss=epoch_cur_ori_loss.avg,
+        cur_contact_loss=epoch_cur_contact_loss.avg,
+        cur_contact_acc=epoch_cur_contact_acc.avg,
         mean_loss=epoch_mean_loss.avg,
         mean_xy_loss=epoch_mean_xy_loss.avg,
         mean_depth_loss=epoch_mean_depth_loss.avg,
@@ -692,7 +716,9 @@ def train(
         mean_contact_loss=epoch_mean_contact_loss.avg,
         mean_contact_acc=epoch_mean_contact_acc.avg,
         global_step=global_step,
-        epoch_metric_stats=epoch_metric_stats
+        epoch_metric_stats=epoch_metric_stats,
+        task_metric_stats=None,
+        contact_stats=contact_stats
     )
 
 
@@ -713,12 +739,12 @@ def test(
     epoch_contact_acc = AvgrageMeter()
 
     # using current hand info for prediction as baseline
-    epoch_bl_loss = AvgrageMeter()
-    epoch_bl_xy_loss = AvgrageMeter()
-    epoch_bl_depth_loss = AvgrageMeter()
-    epoch_bl_ori_loss = AvgrageMeter()
-    epoch_bl_contact_loss = AvgrageMeter()
-    epoch_bl_contact_acc = AvgrageMeter()
+    epoch_cur_loss = AvgrageMeter()
+    epoch_cur_xy_loss = AvgrageMeter()
+    epoch_cur_depth_loss = AvgrageMeter()
+    epoch_cur_ori_loss = AvgrageMeter()
+    epoch_cur_contact_loss = AvgrageMeter()
+    epoch_cur_contact_acc = AvgrageMeter()
 
     # using mean of batch for prediction as baseline
     epoch_mean_loss = AvgrageMeter()
@@ -731,6 +757,7 @@ def test(
     data, current_x, current_y, current_depth, current_ori = None, None, None, None, None
     epoch_metric_stats = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
     task_metric_stats = None
+    contact_stats = {c: {'gt': 0, 'pred': 0, 'bl_cur': 0, 'bl_mean': 0} for c in ['pos', 'neg']}
 
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):
         # process batch data
@@ -784,22 +811,39 @@ def test(
             pred_contact_correct = (pred_contact_binary == future_contact).sum().float()
             contact_acc = pred_contact_correct / pred_contact.size(0)
 
+            pos_inds, neg_inds = future_contact == 1, future_contact == 0
+            pred_contact_pos, pred_contact_neg = pred_contact_binary[pos_inds], pred_contact_binary[neg_inds]
+            future_contact_pos, future_contact_neg = future_contact[pos_inds], future_contact[neg_inds]
+            n_pos, n_neg = future_contact_pos.size(0), future_contact_neg.size(0)
+            pred_n_pos = (pred_contact_pos == future_contact_pos).sum().item()
+            pred_n_neg = (pred_contact_neg == future_contact_neg).sum().item()
+            contact_stats['pos']['gt'] += n_pos
+            contact_stats['neg']['gt'] += n_neg
+            contact_stats['pos']['pred'] += pred_n_pos
+            contact_stats['neg']['pred'] += pred_n_neg
+
             # process baseline loss
-            bl_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
-            bl_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
-            bl_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
+            cur_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
+            cur_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
+            cur_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
 
-            bl_xy_loss = l2_loss_func(bl_xy, target_xy)
-            bl_depth_loss = l2_loss_func(bl_depth, target_depth)
-            bl_ori_loss = l2_loss_func(bl_ori, target_ori)
-            bl_contact_loss = bce_loss_func(current_contact, future_contact)
-            bl_loss = args.lambda1 * bl_xy_loss + \
-                      args.lambda2 * bl_depth_loss + \
-                      args.lambda3 * bl_ori_loss + \
-                      args.lambda4 * bl_contact_loss
+            cur_xy_loss = l2_loss_func(cur_xy, target_xy)
+            cur_depth_loss = l2_loss_func(cur_depth, target_depth)
+            cur_ori_loss = l2_loss_func(cur_ori, target_ori)
+            cur_contact_loss = bce_loss_func(current_contact, future_contact)
+            cur_loss = args.lambda1 * cur_xy_loss + \
+                       args.lambda2 * cur_depth_loss + \
+                       args.lambda3 * cur_ori_loss + \
+                       args.lambda4 * cur_contact_loss
 
-            bl_contact_correct = (current_contact == future_contact).sum().float()
-            bl_contact_acc = bl_contact_correct / current_contact.size(0)
+            cur_contact_correct = (current_contact == future_contact).sum().float()
+            cur_contact_acc = cur_contact_correct / current_contact.size(0)
+
+            cur_pred_contact_pos, cur_pred_contact_neg = current_contact[pos_inds], current_contact[neg_inds]
+            cur_n_pos = (cur_pred_contact_pos == future_contact_pos).sum().item()
+            cur_n_neg = (cur_pred_contact_neg == future_contact_neg).sum().item()
+            contact_stats['pos']['bl_cur'] += cur_n_pos
+            contact_stats['neg']['bl_cur'] += cur_n_neg
 
             mean_xy = torch.mean(target_xy, dim=0).unsqueeze(0).repeat(batch_size, 1)
             mean_depth = torch.mean(target_depth).repeat(batch_size)
@@ -818,6 +862,12 @@ def test(
             mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
             mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
             mean_contact_acc = mean_contact_correct / batch_size
+
+            mean_pred_contact_pos, mean_pred_contact_neg = mean_contact_binary[pos_inds], mean_contact_binary[neg_inds]
+            mean_n_pos = (mean_pred_contact_pos == future_contact_pos).sum().item()
+            mean_n_neg = (mean_pred_contact_neg == future_contact_neg).sum().item()
+            contact_stats['pos']['bl_mean'] += mean_n_pos
+            contact_stats['neg']['bl_mean'] += mean_n_neg
 
             # process metric evaluation
             metric_stats = evaluate_transferable_metric_batch(
@@ -849,12 +899,12 @@ def test(
         epoch_contact_loss.update(contact_loss.data, batch_size)
         epoch_contact_acc.update(contact_acc.data, batch_size)
 
-        epoch_bl_loss.update(bl_loss.data, batch_size)
-        epoch_bl_xy_loss.update(bl_xy_loss.data, batch_size)
-        epoch_bl_depth_loss.update(bl_depth_loss.data, batch_size)
-        epoch_bl_ori_loss.update(bl_ori_loss.data, batch_size)
-        epoch_bl_contact_loss.update(bl_contact_loss.data, batch_size)
-        epoch_bl_contact_acc.update(bl_contact_acc.data, batch_size)
+        epoch_cur_loss.update(cur_loss.data, batch_size)
+        epoch_cur_xy_loss.update(cur_xy_loss.data, batch_size)
+        epoch_cur_depth_loss.update(cur_depth_loss.data, batch_size)
+        epoch_cur_ori_loss.update(cur_ori_loss.data, batch_size)
+        epoch_cur_contact_loss.update(cur_contact_loss.data, batch_size)
+        epoch_cur_contact_acc.update(cur_contact_acc.data, batch_size)
 
         epoch_mean_loss.update(mean_loss.data, 1)
         epoch_mean_xy_loss.update(mean_xy_loss.data, 1)
@@ -1005,9 +1055,9 @@ def test(
 
     stats = namedtuple('stats', [
         'loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc',
-        'bl_loss', 'bl_xy_loss', 'bl_depth_loss', 'bl_ori_loss', 'bl_contact_loss', 'bl_contact_acc',
+        'cur_loss', 'cur_xy_loss', 'cur_depth_loss', 'cur_ori_loss', 'cur_contact_loss', 'cur_contact_acc',
         'mean_loss', 'mean_xy_loss', 'mean_depth_loss', 'mean_ori_loss', 'mean_contact_loss', 'mean_contact_acc',
-        'epoch_metric_stats', 'task_metric_stats'
+        'epoch_metric_stats', 'task_metric_stats', 'contact_stats'
     ])
 
     return stats(
@@ -1017,12 +1067,12 @@ def test(
         ori_loss=epoch_ori_loss.avg,
         contact_loss=epoch_contact_loss.avg,
         contact_acc=epoch_contact_acc.avg,
-        bl_loss=epoch_bl_loss.avg,
-        bl_xy_loss=epoch_bl_xy_loss.avg,
-        bl_depth_loss=epoch_bl_depth_loss.avg,
-        bl_ori_loss=epoch_bl_ori_loss.avg,
-        bl_contact_loss=epoch_bl_contact_loss.avg,
-        bl_contact_acc=epoch_bl_contact_acc.avg,
+        cur_loss=epoch_cur_loss.avg,
+        cur_xy_loss=epoch_cur_xy_loss.avg,
+        cur_depth_loss=epoch_cur_depth_loss.avg,
+        cur_ori_loss=epoch_cur_ori_loss.avg,
+        cur_contact_loss=epoch_cur_contact_loss.avg,
+        cur_contact_acc=epoch_cur_contact_acc.avg,
         mean_loss=epoch_mean_loss.avg,
         mean_xy_loss=epoch_mean_xy_loss.avg,
         mean_depth_loss=epoch_mean_depth_loss.avg,
@@ -1030,14 +1080,16 @@ def test(
         mean_contact_loss=epoch_mean_contact_loss.avg,
         mean_contact_acc=epoch_mean_contact_acc.avg,
         epoch_metric_stats=epoch_metric_stats,
-        task_metric_stats=task_metric_stats
+        task_metric_stats=task_metric_stats,
+        contact_stats=contact_stats
     )
 
 
 def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     mode = 'train' if train else 'valid'
     metric_stats = stats.epoch_metric_stats
-    task_metric_stats = stats.task_metric_stats if not train else None
+    task_metric_stats = stats.task_metric_stats
+    contact_stats = stats.contact_stats
 
     # log train epoch stats
     print(f'epoch {mode} loss: {stats.loss}')
@@ -1054,19 +1106,19 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     writer.add_scalar(f'{mode}_epoch/contact_loss', stats.contact_loss, epoch)
     writer.add_scalar(f'{mode}_epoch/contact_acc', stats.contact_acc, epoch)
 
-    writer.add_scalar(f'{mode}_epoch_baseline/current_loss', stats.bl_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/current_xy_loss', stats.bl_xy_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/current_depth_loss', stats.bl_depth_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/current_ori_loss', stats.bl_ori_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/current_contact_loss', stats.bl_contact_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/current_contact_acc', stats.bl_contact_acc, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_current/loss', stats.cur_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_current/xy_loss', stats.cur_xy_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_current/depth_loss', stats.cur_depth_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_current/ori_loss', stats.cur_ori_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_current/contact_loss', stats.cur_contact_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_current/contact_acc', stats.cur_contact_acc, epoch)
 
-    writer.add_scalar(f'{mode}_epoch_baseline/mean_loss', stats.mean_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/mean_xy_loss', stats.mean_xy_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/mean_depth_loss', stats.mean_depth_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/mean_ori_loss', stats.mean_ori_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/mean_contact_loss', stats.mean_contact_loss, epoch)
-    writer.add_scalar(f'{mode}_epoch_baseline/mean_contact_acc', stats.mean_contact_acc, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_mean/loss', stats.mean_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_mean/xy_loss', stats.mean_xy_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_mean/depth_loss', stats.mean_depth_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_mean/ori_loss', stats.mean_ori_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_mean/contact_loss', stats.mean_contact_loss, epoch)
+    writer.add_scalar(f'{mode}_epoch_baseline_mean/contact_acc', stats.mean_contact_acc, epoch)
 
     if train:
         writer.add_scalar('stats/epoch_steps', global_step, epoch)
@@ -1135,6 +1187,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     writer.add_figure(f'{mode}_metric/count', fig, epoch)
     plt.close(fig)
 
+    # log task conditioning plots
     if not train and args.eval_tasks:
         # visualize metric evaluation success rate by bar plot
         bar_width = 0.7
@@ -1176,6 +1229,73 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         plt.tight_layout()
         writer.add_figure(f'{mode}_eval_tasks_metric/task_conditioning_count', fig, epoch)
         plt.close(fig)
+
+    # log contact plots
+    gt_n_pos, gt_n_neg = contact_stats['pos']['gt'], contact_stats['neg']['gt']
+    gt_n_total = gt_n_pos + gt_n_neg
+    pred_n_pos, pred_n_neg = contact_stats['pos']['pred'], contact_stats['neg']['pred']
+    cur_n_pos, cur_n_neg = contact_stats['pos']['bl_cur'], contact_stats['neg']['bl_cur']
+    mean_n_pos, mean_n_neg = contact_stats['pos']['bl_mean'], contact_stats['neg']['bl_mean']
+
+    # visualize contact success rate by bar plot
+    bar_width = 0.25
+    fig = plt.figure(figsize=(4 * 3, fig_height))
+
+    pred_success_rate = [pred_n_pos / gt_n_pos, pred_n_neg / gt_n_neg, (pred_n_pos + pred_n_neg) / gt_n_total]
+    cur_success_rate = [cur_n_pos / gt_n_pos, cur_n_neg / gt_n_neg, (cur_n_pos + cur_n_neg) / gt_n_total]
+    mean_success_rate = [mean_n_pos / gt_n_pos, mean_n_neg / gt_n_neg, (mean_n_pos + mean_n_neg) / gt_n_total]
+    bar1 = np.arange(3)
+    bar2 = [x + bar_width for x in bar1]
+    bar3 = [x + bar_width for x in bar2]
+
+    plt.bar(bar1, pred_success_rate, color='peachpuff', width=bar_width, label='pred')
+    plt.bar(bar2, cur_success_rate, color='lavender', width=bar_width, label='bl_cur')
+    plt.bar(bar3, mean_success_rate, color='skyblue', width=bar_width, label='bl_mean')
+    for b1, ps, b2, cs, b3, ms in zip(bar1, pred_success_rate, bar2, cur_success_rate, bar3, mean_success_rate):
+        plt.text(b1, ps / 2, f'{ps:.2f}', ha='center', fontsize=8)
+        plt.text(b2, cs / 2, f'{cs:.2f}', ha='center', fontsize=8)
+        plt.text(b3, ms / 2, f'{ms:.2f}', ha='center', fontsize=8)
+
+    plt.xticks([r + bar_width for r in bar1], ['pos', 'neg', 'combined'])
+    plt.ylabel('Success rate', fontweight='bold', size=13)
+    plt.ylim([0, 1])
+    plt.title('Contact')
+    plt.legend()
+    plt.tight_layout()
+    writer.add_figure(f'{mode}_contact/success_rate', fig, epoch)
+    plt.close(fig)
+
+    # visualize contact success count by bar plot
+    bar_width = 0.2
+    fig = plt.figure(figsize=(5 * 3, fig_height))
+
+    pred_success = [pred_n_pos, pred_n_neg, pred_n_pos + pred_n_neg]
+    cur_success = [cur_n_pos, cur_n_neg, cur_n_pos + cur_n_neg]
+    mean_success = [mean_n_pos, mean_n_neg, mean_n_pos + mean_n_neg]
+    total = [gt_n_pos, gt_n_neg, gt_n_total]
+    bar1 = np.arange(3)
+    bar2 = [x + bar_width for x in bar1]
+    bar3 = [x + bar_width for x in bar2]
+    bar4 = [x + bar_width for x in bar3]
+
+    plt.bar(bar1, pred_success, color='peachpuff', width=bar_width, label='pred')
+    plt.bar(bar2, cur_success, color='lavender', width=bar_width, label='bl_cur')
+    plt.bar(bar3, mean_success, color='skyblue', width=bar_width, label='bl_mean')
+    plt.bar(bar4, total, color='wheat', width=bar_width, label='total')
+
+    for b1, ps, b2, cs, b3, ms, b4, t in zip(bar1, pred_success, bar2, cur_success, bar3, mean_success, bar4, total):
+        plt.text(b1, ps / 2, ps, ha='center', fontsize=8)
+        plt.text(b2, cs / 2, cs, ha='center', fontsize=8)
+        plt.text(b3, ms / 2, ms, ha='center', fontsize=8)
+        plt.text(b4, t / 2, t, ha='center', fontsize=8)
+
+    plt.xticks([r + bar_width * 1.5 for r in bar1], ['pos', 'neg', 'combined'])
+    plt.ylabel('Count', fontweight='bold', size=13)
+    plt.title('Contact')
+    plt.legend()
+    plt.tight_layout()
+    writer.add_figure(f'{mode}_contact/count', fig, epoch)
+    plt.close(fig)
 
 
 if __name__ == '__main__':
