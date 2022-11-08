@@ -5,8 +5,8 @@
 #SBATCH --time=48:00:00
 #SBATCH --gpus=1
 #SBATCH -w node-2080ti-5
-#SBATCH --job-name=n2norm
-#SBATCH -o /home/junyao/transferable_out/nblocks=2_normal.out
+#SBATCH --job-name=t15n2N
+#SBATCH -o /home/junyao/transferable_out/t=15_nblocks=2_lambdas=[1,1,1,1].out
 
 #SBATCH --mem-per-gpu=24G
 #SBATCH --partition=dineshj-compute

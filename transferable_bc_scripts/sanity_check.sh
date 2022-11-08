@@ -21,17 +21,20 @@ export LAMBDA2=1; echo "LAMBDA2: ${LAMBDA2}"
 export LAMBDA3=1; echo "LAMBDA3: ${LAMBDA3}"
 export LAMBDA4=1; echo "LAMBDA4: ${LAMBDA4}"
 export PRED_NODE=$pred_mode; echo "PRED_NODE: ${PRED_NODE}"
-export EVAL_FREQ=50; echo "EVAL_FREQ: ${EVAL_FREQ}"
+#export EVAL_FREQ=50; echo "EVAL_FREQ: ${EVAL_FREQ}"
+export EVAL_FREQ=10; echo "EVAL_FREQ: ${EVAL_FREQ}"
 export SAVE_FREQ=2000; echo "SAVE_FREQ: ${SAVE_FREQ}"
-export EPOCHS=2000; echo "EPOCHS: ${EPOCHS}"
+#export EPOCHS=2000; echo "EPOCHS: ${EPOCHS}"
+export EPOCHS=500; echo "EPOCHS: ${EPOCHS}"
 export SANITY_CHECK_SIZE=$batch_size; echo "SANITY_CHECK_SIZE: ${SANITY_CHECK_SIZE}"
 export BATCH_SIZE=$batch_size; echo "BATCH_SIZE: ${BATCH_SIZE}"
 export VIS_SAMPLE_SIZE=5; echo "VIS_SAMPLE_SIZE: ${VIS_SAMPLE_SIZE}"
 export TASK_VIS_SAMPLE_SIZE=0; echo "TASK_VIS_SAMPLE_SIZE: ${TASK_VIS_SAMPLE_SIZE}"
 export NUM_WORKERS=4; echo "NUM_WORKERS: ${NUM_WORKERS}"
 export DATETIME=$date_time; echo "DATETIME: ${DATETIME}"
-export SAVE="sanity_check/${DATETIME}/cv_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_date=${DATETIME}"
+# export SAVE="sanity_check/${DATETIME}/cv_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_date=${DATETIME}"
 # export SAVE="sanity_check/batchnorm_check_${DATETIME}/bsize=${BATCH_SIZE}_affine=false_forward=false"
+export SAVE="sanity_check/${DATETIME}_implement_check/cv"
 echo "SAVE: ${SAVE}"
 
 CUDA_VISIBLE_DEVICES=$cuda_device xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
@@ -48,6 +51,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device xvfb-run -a python /home/junyao/LfHV/r3m/train
 --epochs=${EPOCHS} \
 --sanity_check \
 --sanity_check_size=${SANITY_CHECK_SIZE} \
+--eval_tasks \
 --batch_size=${BATCH_SIZE} \
 --vis_sample_size=${VIS_SAMPLE_SIZE} \
 --task_vis_sample_size=${TASK_VIS_SAMPLE_SIZE} \

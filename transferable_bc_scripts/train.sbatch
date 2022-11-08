@@ -6,30 +6,31 @@
 #SBATCH --time=48:00:00
 #SBATCH --gpus=1
 #SBATCH -w node-3090-0
-#SBATCH --job-name=n32lam
-#SBATCH -o /home/junyao/transferable_out/nblocks=32_lambdas.out
+#SBATCH --job-name=t10n8N
+#SBATCH -o /home/junyao/transferable_out/t=10_nblocks=8_lambdas=[1,1,1,1].out
 
-export N_BLOCKS=32; echo "N_BLOCKS: ${N_BLOCKS}"
-export LAMBDA1=20; echo "LAMBDA1: ${LAMBDA1}"
+export N_BLOCKS=8; echo "N_BLOCKS: ${N_BLOCKS}"
+export LAMBDA1=1; echo "LAMBDA1: ${LAMBDA1}"
 export LAMBDA2=1; echo "LAMBDA2: ${LAMBDA2}"
 export LAMBDA3=1; echo "LAMBDA3: ${LAMBDA3}"
-export LAMBDA4=3; echo "LAMBDA4: ${LAMBDA4}"
-export TIME_INTERVAL=15; echo "TIME_INTERVAL: ${TIME_INTERVAL}"
+export LAMBDA4=1; echo "LAMBDA4: ${LAMBDA4}"
+export TIME_INTERVAL=10; echo "TIME_INTERVAL: ${TIME_INTERVAL}"
 export NET_TYPE="residual"; echo "NET_TYPE: ${NET_TYPE}"
 export LR=0.0004; echo "LR: ${LR}"
 export PRED_NODE="residual"; echo "PRED_NODE: ${PRED_NODE}"
 export EVAL_FREQ=2; echo "EVAL_FREQ: ${EVAL_FREQ}"
 export LOG_SCALAR_FREQ=100; echo "LOG_SCALAR_FREQ: ${LOG_SCALAR_FREQ}"
-export SAVE_FREQ=5; echo "SAVE_FREQ: ${SAVE_FREQ}"
+export SAVE_FREQ=10; echo "SAVE_FREQ: ${SAVE_FREQ}"
 export VIS_FREQ=2000; echo "VIS_FREQ: ${VIS_FREQ}"
 export EPOCHS=500; echo "EPOCHS: ${EPOCHS}"
 export BATCH_SIZE=128; echo "BATCH_SIZE: ${BATCH_SIZE}"
 export VIS_SAMPLE_SIZE=8; echo "VIS_SAMPLE_SIZE: ${VIS_SAMPLE_SIZE}"
 export TASK_VIS_SAMPLE_SIZE=5; echo "TASK_VIS_SAMPLE_SIZE: ${TASK_VIS_SAMPLE_SIZE}"
 export NUM_WORKERS=4; echo "NUM_WORKERS: ${NUM_WORKERS}"
-export DATETIME=11041800; echo "DATETIME: ${DATETIME}"
-export SAVE="${DATETIME}/cluster_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_lr=${LR}\
+export DATETIME=11072100; echo "DATETIME: ${DATETIME}"
+export SAVE="${DATETIME}/cluster_t=${TIME_INTERVAL}_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_lr=${LR}\
 _lambdas=[${LAMBDA1},${LAMBDA2},${LAMBDA3},${LAMBDA4}]_batch=${BATCH_SIZE}"
+#export SAVE="${DATETIME}/eval_on_train"
 echo "SAVE: ${SAVE}"
 export DATA_HOME_DIR="/scratch/junyao/Datasets/something_something_processed"; echo "DATA_HOME_DIR: ${DATA_HOME_DIR}"
 
