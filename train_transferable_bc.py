@@ -62,6 +62,8 @@ def parse_args():
                         help='weight for orientation loss')
     parser.add_argument('--lambda4', type=float, default=1.0,
                         help='weight for contact loss')
+    parser.add_argument('--bce_weight_mult', type=float, default=1.0,
+                        help='multiplier for BCE loss pos_weight parameter')
     parser.add_argument('--pred_mode', type=str, default="residual",
                         choices=[
                             'original', # use original target values
@@ -193,7 +195,7 @@ def main(args):
     args.ori_norm_params = load_pkl(args.ori_norm_params_path)
     args.contact_count_path = join(args.contact_count_dir, f'contact_count_t={args.time_interval}.pkl')
     args.contact_count = load_pkl(args.contact_count_path)
-    args.bce_pos_weight = args.contact_count['n_neg'] / args.contact_count['n_pos']
+    args.bce_pos_weight = args.bce_weight_mult * args.contact_count['n_neg'] / args.contact_count['n_pos']
     print(f'Positive Weight for BCE: {args.bce_pos_weight:.4f}')
 
     # optimizer and loss
@@ -1135,6 +1137,7 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         writer.add_scalar('stats/lambda3', args.lambda3, epoch)
         writer.add_scalar('stats/lambda4', args.lambda4, epoch)
         writer.add_scalar('stats/bce_pos_weight', args.bce_pos_weight, epoch)
+        writer.add_scalar('stats/bce_weight_mult', args.bce_weight_mult, epoch)
 
     # visualize metric evaluation success rate by bar plot
     bar_width = 0.4
