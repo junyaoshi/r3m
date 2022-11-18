@@ -6,16 +6,16 @@
 #SBATCH --time=48:00:00
 #SBATCH --gpus=1
 #SBATCH -w node-3090-0
-#SBATCH --job-name=t10n8N
-#SBATCH -o /home/junyao/transferable_out/t=10_nblocks=8_lambdas=[1,1,1,1].out
+#SBATCH --job-name=b0.05
+#SBATCH -o /home/junyao/transferable_out/t=15_nblocks=8_lambdas=[1,1,1,20]_bce=005.out
 
 export N_BLOCKS=8; echo "N_BLOCKS: ${N_BLOCKS}"
 export LAMBDA1=1; echo "LAMBDA1: ${LAMBDA1}"
 export LAMBDA2=1; echo "LAMBDA2: ${LAMBDA2}"
 export LAMBDA3=1; echo "LAMBDA3: ${LAMBDA3}"
-export LAMBDA4=1; echo "LAMBDA4: ${LAMBDA4}"
-export BCE_WEIGHT_MULT=1; echo "BCE_WEIGHT_MULT: ${BCE_WEIGHT_MULT}"
-export TIME_INTERVAL=10; echo "TIME_INTERVAL: ${TIME_INTERVAL}"
+export LAMBDA4=20; echo "LAMBDA4: ${LAMBDA4}"
+export BCE_WEIGHT_MULT=0.05; echo "BCE_WEIGHT_MULT: ${BCE_WEIGHT_MULT}"
+export TIME_INTERVAL=15; echo "TIME_INTERVAL: ${TIME_INTERVAL}"
 export NET_TYPE="residual"; echo "NET_TYPE: ${NET_TYPE}"
 export LR=0.0004; echo "LR: ${LR}"
 export PRED_NODE="residual"; echo "PRED_NODE: ${PRED_NODE}"
@@ -28,9 +28,9 @@ export BATCH_SIZE=128; echo "BATCH_SIZE: ${BATCH_SIZE}"
 export VIS_SAMPLE_SIZE=8; echo "VIS_SAMPLE_SIZE: ${VIS_SAMPLE_SIZE}"
 export TASK_VIS_SAMPLE_SIZE=5; echo "TASK_VIS_SAMPLE_SIZE: ${TASK_VIS_SAMPLE_SIZE}"
 export NUM_WORKERS=4; echo "NUM_WORKERS: ${NUM_WORKERS}"
-export DATETIME=11072100; echo "DATETIME: ${DATETIME}"
+export DATETIME=11082030; echo "DATETIME: ${DATETIME}"
 export SAVE="${DATETIME}/cluster_t=${TIME_INTERVAL}_net=${NET_TYPE}_nblocks=${N_BLOCKS}_pred=${PRED_NODE}_lr=${LR}\
-_lambdas=[${LAMBDA1},${LAMBDA2},${LAMBDA3},${LAMBDA4}]_batch=${BATCH_SIZE}"
+_lambdas=[${LAMBDA1},${LAMBDA2},${LAMBDA3},${LAMBDA4}]_bce=${BCE_WEIGHT_MULT}_batch=${BATCH_SIZE}"
 #export SAVE="${DATETIME}/eval_on_train"
 echo "SAVE: ${SAVE}"
 export DATA_HOME_DIR="/scratch/junyao/Datasets/something_something_processed"; echo "DATA_HOME_DIR: ${DATA_HOME_DIR}"
@@ -44,6 +44,7 @@ xvfb-run -a python /home/junyao/LfHV/r3m/train_transferable_bc.py \
 --lambda2=${LAMBDA2} \
 --lambda3=${LAMBDA3} \
 --lambda4=${LAMBDA4} \
+--bce_weight_mult=${BCE_WEIGHT_MULT} \
 --pred_mode=${PRED_NODE} \
 --eval_freq=${EVAL_FREQ} \
 --log_scalar_freq=${LOG_SCALAR_FREQ} \
