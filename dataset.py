@@ -477,7 +477,7 @@ class AgentTransferable(Dataset):
                  iou_thresh=0.7, time_interval=5,
                  depth_descriptor='scaling_factor', depth_norm_params=None, ori_norm_params=None,
                  debug=False, run_on_cv_server=False, num_cpus=4,
-                 has_task_labels=True, has_future_labels=True):
+                 has_task_labels=True, has_future_labels=True, load_robot_r3m=False):
         """
         Set num_cpus=1 to disable multiprocessing
         """
@@ -494,6 +494,7 @@ class AgentTransferable(Dataset):
         self.num_cpus=num_cpus
         self.has_task_labels = has_task_labels
         self.has_future_labels = has_future_labels
+        self.load_robot_r3m = load_robot_r3m
 
         self.num_tasks = len(task_names)
         self.task_dict = {}
@@ -695,7 +696,12 @@ class AgentTransferable(Dataset):
 
         with open(hand_r3m_path, 'rb') as f:
             hand_r3m_embedding = pickle.load(f)
-        robot_r3m_embedding = torch.zeros_like(hand_r3m_embedding)
+        if self.load_robot_r3m:
+            robot_r3m_path = '/' + join(*hand_r3m_path.split('/')[:-3], 'robot_r3m', *hand_r3m_path.split('/')[-2:])
+            with open(robot_r3m_path, 'rb') as f:
+                robot_r3m_embedding = pickle.load(f)
+        else:
+            robot_r3m_embedding = torch.zeros_like(hand_r3m_embedding)
 
         current_info = self._extract_hand_info(current_hand_pose_path, hand)
         if self.has_future_labels:
@@ -732,7 +738,7 @@ class AgentTransferable(Dataset):
 if __name__ == '__main__':
     debug = False
     run_on_cv_server = True
-    num_cpus = 8
+    num_cpus = 1
     batch_size = 4
     time_interval = 15
     test_ss_r3m = False
@@ -740,10 +746,10 @@ if __name__ == '__main__':
     test_ss_robot_demos_r3m = False
     test_ss_same_hand_demos_r3m = False
     test_franka_hand_demos_r3m = False
-    test_transferable = True
+    test_transferable = False
     test_count_contact = False
     count_contact = False
-    test_trasnferable_demos = False
+    test_trasnferable_demos = True
 
     if test_ss_r3m:
         # test SomethingSomethingR3M
@@ -1146,10 +1152,10 @@ if __name__ == '__main__':
 
     if test_trasnferable_demos:
         data_home_dirs = [
-            # '/home/junyao/WidowX_Datasets/something_something_pre_interaction_check_online/var_hand_same_object',
-            '/home/junyao/WidowX_Datasets/something_something_pre_interaction_check_online/var_hand_no_object',
-            # '/home/junyao/WidowX_Datasets/something_something_pre_interaction_check_online/same_hand_var_object',
+            '/home/junyao/WidowX_Datasets/something_something_hand_robot_paired/widowx_during_interaction_0922',
+            '/home/junyao/WidowX_Datasets/something_something_hand_robot_paired/widowx_during_interaction_1',
         ]
+        load_robot_r3m = True
 
         depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
         ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
@@ -1172,6 +1178,7 @@ if __name__ == '__main__':
             num_cpus=0,
             has_task_labels=False,
             has_future_labels=False,
+            load_robot_r3m=load_robot_r3m
         )
         end = time.time()
         print(f'Loaded data. Time: {end - start}')
