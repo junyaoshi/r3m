@@ -472,7 +472,7 @@ class SomethingSomethingDemosR3M(Dataset):
 
 
 class AgentTransferable(Dataset):
-    def __init__(self, data_home_dir,
+    def __init__(self, data_home_dirs,
                  task_names=None, split=None,
                  iou_thresh=0.7, time_interval=5,
                  depth_descriptor='scaling_factor', depth_norm_params=None, ori_norm_params=None,
@@ -481,7 +481,7 @@ class AgentTransferable(Dataset):
         """
         Set num_cpus=1 to disable multiprocessing
         """
-        self.data_home_dir = data_home_dir
+        self.data_home_dirs = data_home_dirs
         self.task_names = task_names if has_task_labels else []
         self.split = split
         self.iou_thresh = iou_thresh
@@ -521,6 +521,8 @@ class AgentTransferable(Dataset):
     def fetch_data(self, num_cpus):
         if not self.has_task_labels:
             assert num_cpus == 1 or num_cpus == 0, 'Does not support multiprocessing when there are no task labels'
+        if len(self.data_home_dirs) > 1:
+            assert num_cpus == 1 or num_cpus == 0, 'Does not support multiprocessing when there are multiple data dirs'
         if self.debug:
             if self.has_task_labels:
                 self.task_names = [self.task_names[0]]
@@ -567,61 +569,66 @@ class AgentTransferable(Dataset):
     def single_process_fetch_data(self, task_names):
         r3m_paths, tasks, hands = [], [], []
         current_hand_pose_paths, future_hand_pose_paths = [], []
-        if not self.has_task_labels:
-            task_names = [None]
-        for task_name in task_names:
-            if task_name is None:
-                split_dir = self.data_home_dir
-                print(f'Processing directory: {split_dir}')
-            else:
-                print(f'Processing task: {task_name}.')
-                if self.split is None:
-                    split_dir = join(self.data_home_dir, task_name)
+        for data_home_dir in self.data_home_dirs:
+            if not self.has_task_labels:
+                task_names = [None]
+            for task_name in task_names:
+                if task_name is None:
+                    split_dir = data_home_dir
+                    print(f'Processing directory: {split_dir}')
                 else:
-                    split_dir = join(self.data_home_dir, task_name, self.split)
-            r3m_dir = join(split_dir, 'r3m')
-            iou_json_path = join(split_dir, f'IoU_{self.iou_thresh}.json')
-            with open(iou_json_path, 'r') as f:
-                json_dict = json.load(f)
-                f.close()
-
-            for vid_num in tqdm(json_dict, desc='Going through videos...'):
-                r3m_vid_dir = join(r3m_dir, vid_num)
-                mocap_vid_dir = join(split_dir, 'mocap_output', vid_num, 'mocap')
-                for current_frame_num in json_dict[vid_num]:
-                    # check if future frame exists
-                    future_frame_num = str(int(current_frame_num) + self.time_interval)
-                    if future_frame_num not in json_dict[vid_num] and self.has_future_labels:
-                        continue
-
-                    # check if current and future frames have the same hand
-                    current_hand_pose_path = join(mocap_vid_dir, f'frame{current_frame_num}_prediction_result.pkl')
-                    with open(current_hand_pose_path, 'rb') as f:
-                        current_hand_info = pickle.load(f)
-                    current_hand = determine_which_hand(current_hand_info)
-
-                    if self.has_future_labels:
-                        future_hand_pose_path = join(mocap_vid_dir, f'frame{future_frame_num}_prediction_result.pkl')
-                        with open(future_hand_pose_path, 'rb') as f:
-                            future_hand_info = pickle.load(f)
-                        future_hand = determine_which_hand(future_hand_info)
-                        if current_hand != future_hand:
-                            continue
-                        future_hand_pose_paths.append(future_hand_pose_path)
-
-                    if self.has_task_labels:
-                        task = np.zeros(self.num_tasks)
-                        task[self.task_dict[task_name]] = 1
+                    print(f'Processing task: {task_name}.')
+                    if self.split is None:
+                        split_dir = join(data_home_dir, task_name)
                     else:
-                        task = 0  # placeholder for no task labels
+                        split_dir = join(data_home_dir, task_name, self.split)
+                r3m_dir = join(split_dir, 'r3m')
+                iou_json_path = join(split_dir, f'IoU_{self.iou_thresh}.json')
+                with open(iou_json_path, 'r') as f:
+                    json_dict = json.load(f)
+                    f.close()
 
-                    hands.append(current_hand)
-                    r3m_paths.append(join(r3m_vid_dir, f'frame{current_frame_num}_r3m.pkl'))
-                    tasks.append(task)
-                    current_hand_pose_paths.append(current_hand_pose_path)
+                for vid_num in tqdm(json_dict, desc='Going through videos...'):
+                    r3m_vid_dir = join(r3m_dir, vid_num)
+                    mocap_vid_dir = join(split_dir, 'mocap_output', vid_num, 'mocap')
 
-                if self.debug and len(r3m_paths) > 600:
-                    break
+                    # handle debug mode
+                    if self.debug and len(r3m_paths) > 600:
+                        break
+
+                    for current_frame_num in json_dict[vid_num]:
+                        # check if future frame exists
+                        future_frame_num = str(int(current_frame_num) + self.time_interval)
+                        if future_frame_num not in json_dict[vid_num] and self.has_future_labels:
+                            continue
+
+                        # check if current and future frames have the same hand
+                        current_hand_pose_path = join(mocap_vid_dir, f'frame{current_frame_num}_prediction_result.pkl')
+                        with open(current_hand_pose_path, 'rb') as f:
+                            current_hand_info = pickle.load(f)
+                        current_hand = determine_which_hand(current_hand_info)
+
+                        if self.has_future_labels:
+                            future_hand_pose_path = join(mocap_vid_dir, f'frame{future_frame_num}_prediction_result.pkl')
+                            with open(future_hand_pose_path, 'rb') as f:
+                                future_hand_info = pickle.load(f)
+                            future_hand = determine_which_hand(future_hand_info)
+                            if current_hand != future_hand:
+                                continue
+                            future_hand_pose_paths.append(future_hand_pose_path)
+
+                        if self.has_task_labels:
+                            task = np.zeros(self.num_tasks)
+                            task[self.task_dict[task_name]] = 1
+                        else:
+                            task = 0  # placeholder for no task labels
+
+                        hands.append(current_hand)
+                        r3m_paths.append(join(r3m_vid_dir, f'frame{current_frame_num}_r3m.pkl'))
+                        tasks.append(task)
+                        current_hand_pose_paths.append(current_hand_pose_path)
+
+
 
         return r3m_paths, tasks, hands, current_hand_pose_paths, future_hand_pose_paths
 
@@ -684,7 +691,6 @@ class AgentTransferable(Dataset):
         hand_r3m_path = self.r3m_paths[idx]
         task = self.tasks[idx]
         current_hand_pose_path = self.current_hand_pose_paths[idx]
-        future_hand_pose_path = self.future_hand_pose_paths[idx]
         hand = self.hands[idx]
 
         with open(hand_r3m_path, 'rb') as f:
@@ -692,37 +698,52 @@ class AgentTransferable(Dataset):
         robot_r3m_embedding = torch.zeros_like(hand_r3m_embedding)
 
         current_info = self._extract_hand_info(current_hand_pose_path, hand)
-        future_info = self._extract_hand_info(future_hand_pose_path, hand)
+        if self.has_future_labels:
+            future_hand_pose_path = self.future_hand_pose_paths[idx]
+            future_info = self._extract_hand_info(future_hand_pose_path, hand)
+            future_x = future_info.wrist_x_normalized
+            future_y = future_info.wrist_y_normalized
+            future_depth = future_info.hand_depth_normalized
+            future_ori = future_info.wrist_orientation
+            future_contact = future_info.contact
+            future_img_shape = future_info.img_shape
+            future_info_path = future_hand_pose_path
+        else:
+            future_x, future_y, future_depth, future_contact = 0., 0., 0., -1
+            future_ori = np.zeros_like(current_info.wrist_orientation)
+            future_img_shape = current_info.img_shape
+            future_info_path = ''
 
         return item(
             hand_r3m=hand_r3m_embedding.squeeze().to(torch.device('cpu')),
             robot_r3m=robot_r3m_embedding.squeeze().to(torch.device('cpu')),
             task=task,
             hand=hand,
-            current_x=current_info.wrist_x_normalized, future_x=future_info.wrist_x_normalized,
-            current_y=current_info.wrist_y_normalized, future_y=future_info.wrist_y_normalized,
-            current_depth=current_info.hand_depth_normalized, future_depth=future_info.hand_depth_normalized,
-            current_ori=current_info.wrist_orientation, future_ori=future_info.wrist_orientation,
-            current_contact=current_info.contact, future_contact=future_info.contact,
-            current_img_shape=current_info.img_shape, future_img_shape=future_info.img_shape,
-            current_info_path=current_hand_pose_path, future_info_path=future_hand_pose_path
+            current_x=current_info.wrist_x_normalized, future_x=future_x,
+            current_y=current_info.wrist_y_normalized, future_y=future_y,
+            current_depth=current_info.hand_depth_normalized, future_depth=future_depth,
+            current_ori=current_info.wrist_orientation, future_ori=future_ori,
+            current_contact=current_info.contact, future_contact=future_contact,
+            current_img_shape=current_info.img_shape, future_img_shape=future_img_shape,
+            current_info_path=current_hand_pose_path, future_info_path=future_info_path
         )
 
 
 if __name__ == '__main__':
     debug = False
-    run_on_cv_server = False
-    num_cpus = 16
+    run_on_cv_server = True
+    num_cpus = 8
     batch_size = 4
-    time_interval = 10
+    time_interval = 15
     test_ss_r3m = False
     test_ss_hand_demos_r3m = False
     test_ss_robot_demos_r3m = False
     test_ss_same_hand_demos_r3m = False
     test_franka_hand_demos_r3m = False
-    test_transferable = False
+    test_transferable = True
     test_count_contact = False
-    count_contact = True
+    count_contact = False
+    test_trasnferable_demos = False
 
     if test_ss_r3m:
         # test SomethingSomethingR3M
@@ -968,34 +989,25 @@ if __name__ == '__main__':
 
     if test_transferable:
         if run_on_cv_server:
-            task_names = [
-                'push_left',
-                'push_right',
-                'move_down',
-                'move_up',
-            ]
             data_home_dir = '/home/junyao/Datasets/something_something_processed'
         else:
-            task_names = [
-                'move_away',
-                'move_towards',
-                'move_down',
-                'move_up',
-                'pull_left',
-                'pull_right',
-                'push_left',
-                'push_right',
-            ]
             data_home_dir = '/scratch/junyao/Datasets/something_something_processed'
+
         depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
+        ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
+
+        # load pkl
+        depth_norm_params = load_pkl(depth_norm_params_path)['scaling_factor']
+        ori_norm_params = load_pkl(ori_norm_params_path)
 
         start = time.time()
         valid_data = AgentTransferable(
-            data_home_dir=data_home_dir,
-            task_names=task_names,
+            data_home_dirs=[data_home_dir],
+            task_names=CLUSTER_TASKS,
             split='valid',
             time_interval=time_interval,
-            depth_norm_params_path=depth_norm_params_path,
+            depth_norm_params=depth_norm_params,
+            ori_norm_params=ori_norm_params,
             debug=debug,
             run_on_cv_server=run_on_cv_server,
             num_cpus=num_cpus
@@ -1131,5 +1143,56 @@ if __name__ == '__main__':
         print(f'contact count: {contact_count}')
         with open(contact_count_path, 'wb') as f:
             pickle.dump(contact_count, f)
+
+    if test_trasnferable_demos:
+        data_home_dirs = [
+            # '/home/junyao/WidowX_Datasets/something_something_pre_interaction_check_online/var_hand_same_object',
+            '/home/junyao/WidowX_Datasets/something_something_pre_interaction_check_online/var_hand_no_object',
+            # '/home/junyao/WidowX_Datasets/something_something_pre_interaction_check_online/same_hand_var_object',
+        ]
+
+        depth_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl'
+        ori_norm_params_path = '/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl'
+
+        # load pkl
+        depth_norm_params = load_pkl(depth_norm_params_path)['scaling_factor']
+        ori_norm_params = load_pkl(ori_norm_params_path)
+
+        start = time.time()
+        data = AgentTransferable(
+            data_home_dirs=data_home_dirs,
+            task_names=CLUSTER_TASKS,
+            split=None,
+            iou_thresh=0.6,
+            time_interval=time_interval,
+            depth_norm_params=depth_norm_params,
+            ori_norm_params=ori_norm_params,
+            debug=debug,
+            run_on_cv_server=run_on_cv_server,
+            num_cpus=0,
+            has_task_labels=False,
+            has_future_labels=False,
+        )
+        end = time.time()
+        print(f'Loaded data. Time: {end - start}')
+        print(f'Number of data: {len(data)}')
+
+        print('Creating data loaders...')
+        queue = torch.utils.data.DataLoader(
+            data, batch_size=batch_size, shuffle=True,
+            num_workers=0, drop_last=False
+        )
+
+        print('Creating data loaders: done')
+        t0 = time.time()
+        for step, data in enumerate(queue):
+            t1 = time.time()
+            print(f'dataloader time: {t1 - t0}s')
+            print(f'current_x: \n{data.current_x}')
+            print(f'future_depth: {data.future_depth}')
+            print(f'current_contact: {data.current_contact}')
+            print(f'future_ori: {data.future_ori}')
+            if step == 0:
+                break
 
     pass

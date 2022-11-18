@@ -113,9 +113,9 @@ def parse_args():
                         help='location of the results')
     parser.add_argument('--save', type=str, default='debug',
                         help='id used for storing intermediate results')
-    parser.add_argument('--data_home_dir', type=str,
+    parser.add_argument('--data_home_dirs', nargs='+',
                         default='/home/junyao/Datasets/something_something_processed',
-                        help='location of the data corpus')
+                        help='list of locations of the data corpus, example: dir1 dir2 dir3')
     parser.add_argument('--frankmocap_path', type=str,
                         default='/home/junyao/LfHV/frankmocap',
                         help='location of frank mocap')
@@ -207,7 +207,7 @@ def main(args):
     print('Creating data loaders...')
     data_start = time.time()
     train_data = AgentTransferable(
-        data_home_dir=args.data_home_dir,
+        data_home_dirs=args.data_home_dirs,
         task_names=task_names,
         split='train',
         iou_thresh=args.iou_thresh,
@@ -234,7 +234,7 @@ def main(args):
     else:
         data_start = time.time()
         valid_data = AgentTransferable(
-            data_home_dir=args.data_home_dir,
+            data_home_dirs=args.data_home_dirs,
             task_names=task_names,
             split='valid',
             iou_thresh=args.iou_thresh,
