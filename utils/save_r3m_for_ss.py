@@ -51,7 +51,7 @@ def main(args):
         r3m_dir = join(args.input_dir, 'robot_r3m')
     else:
         frames_dir = join(args.input_dir, 'frames')
-        r3m_dir = join(args.input_dir, '../r3m')
+        r3m_dir = join(args.input_dir, 'r3m')
 
     n_processed, n_skipped = 0, 0
     for vid_num in tqdm(
