@@ -976,7 +976,7 @@ def test(
             task_instance[0, j] = 1
             all_task_instances.append(task_instance)
         all_task_instances = torch.vstack(all_task_instances)
-        for i in range(len(data)):
+        for i in range(data.current_x.size(0)):
             original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
             task_conditioned_input = torch.cat((
                 data.hand_r3m[i].repeat(len(task_names), 1),
