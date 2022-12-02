@@ -26,6 +26,7 @@ item = namedtuple('item', [
     'current_x', 'future_x',
     'current_y', 'future_y',
     'current_depth', 'future_depth',
+    'current_depth_real', 'future_depth_real',
     'current_ori', 'future_ori',
     'current_contact', 'future_contact',
     'current_img_shape', 'future_img_shape',
@@ -477,7 +478,7 @@ class AgentTransferable(Dataset):
                  iou_thresh=0.7, time_interval=5,
                  depth_descriptor='scaling_factor', depth_norm_params=None, ori_norm_params=None,
                  debug=False, run_on_cv_server=False, num_cpus=4,
-                 has_task_labels=True, has_future_labels=True, load_robot_r3m=False):
+                 has_task_labels=True, has_future_labels=True, load_robot_r3m=False, load_real_depth=False):
         """
         Set num_cpus=1 to disable multiprocessing
         """
@@ -495,6 +496,7 @@ class AgentTransferable(Dataset):
         self.has_task_labels = has_task_labels
         self.has_future_labels = has_future_labels
         self.load_robot_r3m = load_robot_r3m
+        self.load_real_depth = load_real_depth
 
         self.num_tasks = len(task_names)
         self.task_dict = {}
@@ -511,7 +513,8 @@ class AgentTransferable(Dataset):
 
         (
             self.r3m_paths, self.tasks, self.hands,
-            self.current_hand_pose_paths, self.future_hand_pose_paths
+            self.current_hand_pose_paths, self.future_hand_pose_paths,
+            self.current_depth_paths, self.future_depth_paths
         ) = self.fetch_data(num_cpus=num_cpus)
 
         print(f'Dataset has {len(self)} data.')
@@ -529,12 +532,14 @@ class AgentTransferable(Dataset):
                 self.task_names = [self.task_names[0]]
             (
                 r3m_paths, tasks, hands,
-                current_hand_pose_paths, future_hand_pose_paths
+                current_hand_pose_paths, future_hand_pose_paths,
+                current_depth_paths, future_depth_paths
             ) = self.single_process_fetch_data(self.task_names)
         elif num_cpus == 1 or num_cpus == 0:
             (
                 r3m_paths, tasks, hands,
-                current_hand_pose_paths, future_hand_pose_paths
+                current_hand_pose_paths, future_hand_pose_paths,
+                current_depth_paths, future_depth_paths
             ) = self.single_process_fetch_data(self.task_names)
         else:
             mp_splits, n_tasks_left, n_cpus_left = [0], self.num_tasks, num_cpus
@@ -554,22 +559,31 @@ class AgentTransferable(Dataset):
                 r = list(tqdm(p.imap(self.single_process_fetch_data, args_list), total=num_cpus))
             r3m_paths, tasks, hands = [], [], []
             current_hand_pose_paths, future_hand_pose_paths = [], []
+            current_depth_paths, future_depth_paths = [], []
             for process_r in r:
                 (
                     p_r3m_paths, p_tasks, p_hands,
-                    p_current_hand_pose_paths, p_future_hand_pose_paths
+                    p_current_hand_pose_paths, p_future_hand_pose_paths,
+                    p_current_depth_paths, p_future_depth_paths
                 ) = process_r
                 r3m_paths += p_r3m_paths
                 tasks += p_tasks
                 hands += p_hands
                 current_hand_pose_paths += p_current_hand_pose_paths
                 future_hand_pose_paths += p_future_hand_pose_paths
+                current_depth_paths += p_current_depth_paths
+                future_depth_paths += p_future_depth_paths
 
-        return r3m_paths, tasks, hands, current_hand_pose_paths, future_hand_pose_paths
+        return (
+            r3m_paths, tasks, hands,
+            current_hand_pose_paths, future_hand_pose_paths,
+            current_depth_paths, future_depth_paths
+        )
 
     def single_process_fetch_data(self, task_names):
         r3m_paths, tasks, hands = [], [], []
         current_hand_pose_paths, future_hand_pose_paths = [], []
+        current_depth_paths, future_depth_paths = [], []
         for data_home_dir in self.data_home_dirs:
             if not self.has_task_labels:
                 task_names = [None]
@@ -584,6 +598,7 @@ class AgentTransferable(Dataset):
                     else:
                         split_dir = join(data_home_dir, task_name, self.split)
                 r3m_dir = join(split_dir, 'r3m')
+                depths_dir = join(split_dir, 'depths')
                 iou_json_path = join(split_dir, f'IoU_{self.iou_thresh}.json')
                 with open(iou_json_path, 'r') as f:
                     json_dict = json.load(f)
@@ -592,6 +607,7 @@ class AgentTransferable(Dataset):
                 for vid_num in tqdm(json_dict, desc='Going through videos...'):
                     r3m_vid_dir = join(r3m_dir, vid_num)
                     mocap_vid_dir = join(split_dir, 'mocap_output', vid_num, 'mocap')
+                    depths_vid_dir = join(depths_dir, vid_num)
 
                     # handle debug mode
                     if self.debug and len(r3m_paths) > 600:
@@ -609,6 +625,7 @@ class AgentTransferable(Dataset):
                             current_hand_info = pickle.load(f)
                         current_hand = determine_which_hand(current_hand_info)
 
+
                         if self.has_future_labels:
                             future_hand_pose_path = join(mocap_vid_dir, f'frame{future_frame_num}_prediction_result.pkl')
                             with open(future_hand_pose_path, 'rb') as f:
@@ -617,6 +634,9 @@ class AgentTransferable(Dataset):
                             if current_hand != future_hand:
                                 continue
                             future_hand_pose_paths.append(future_hand_pose_path)
+                            if self.load_real_depth:
+                                future_depth_path = join(depths_vid_dir, f'frame{future_frame_num}.npy')
+                                future_depth_paths.append(future_depth_path)
 
                         if self.has_task_labels:
                             task = np.zeros(self.num_tasks)
@@ -628,19 +648,25 @@ class AgentTransferable(Dataset):
                         r3m_paths.append(join(r3m_vid_dir, f'frame{current_frame_num}_r3m.pkl'))
                         tasks.append(task)
                         current_hand_pose_paths.append(current_hand_pose_path)
+                        if self.load_real_depth:
+                            current_depth_path = join(depths_vid_dir, f'frame{current_frame_num}.npy')
+                            current_depth_paths.append(current_depth_path)
 
+        return (
+            r3m_paths, tasks, hands,
+            current_hand_pose_paths, future_hand_pose_paths,
+            current_depth_paths, future_depth_paths
+        )
 
-
-        return r3m_paths, tasks, hands, current_hand_pose_paths, future_hand_pose_paths
-
-    def _extract_hand_info(self, hand_pose_path, hand):
+    def _extract_hand_info(self, hand_pose_path, hand, depth_path=None):
         return process_transferable_mocap_pred(
             mocap_pred_path=hand_pose_path,
             hand=hand,
             depth_norm_params=self.depth_norm_params,
             ori_norm_params=self.ori_norm_params,
             mocap_pred=None,
-            depth_descriptor=self.depth_descriptor
+            depth_descriptor=self.depth_descriptor,
+            depth_real_path=depth_path
         )
 
     def count_contact(self):
@@ -692,6 +718,7 @@ class AgentTransferable(Dataset):
         hand_r3m_path = self.r3m_paths[idx]
         task = self.tasks[idx]
         current_hand_pose_path = self.current_hand_pose_paths[idx]
+        current_depth_path = self.current_depth_paths[idx] if self.load_real_depth else None
         hand = self.hands[idx]
 
         with open(hand_r3m_path, 'rb') as f:
@@ -703,19 +730,21 @@ class AgentTransferable(Dataset):
         else:
             robot_r3m_embedding = torch.zeros_like(hand_r3m_embedding)
 
-        current_info = self._extract_hand_info(current_hand_pose_path, hand)
+        current_info = self._extract_hand_info(current_hand_pose_path, hand, depth_path=current_depth_path)
         if self.has_future_labels:
             future_hand_pose_path = self.future_hand_pose_paths[idx]
-            future_info = self._extract_hand_info(future_hand_pose_path, hand)
+            future_depth_path = self.future_depth_paths[idx] if self.load_real_depth else None
+            future_info = self._extract_hand_info(future_hand_pose_path, hand, depth_path=future_depth_path)
             future_x = future_info.wrist_x_normalized
             future_y = future_info.wrist_y_normalized
             future_depth = future_info.hand_depth_normalized
+            future_depth_real=future_info.hand_depth_real
             future_ori = future_info.wrist_orientation
             future_contact = future_info.contact
             future_img_shape = future_info.img_shape
             future_info_path = future_hand_pose_path
         else:
-            future_x, future_y, future_depth, future_contact = 0., 0., 0., -1
+            future_x, future_y, future_depth, future_depth_real, future_contact = 0., 0., 0., -999, -1
             future_ori = np.zeros_like(current_info.wrist_orientation)
             future_img_shape = current_info.img_shape
             future_info_path = ''
@@ -728,6 +757,7 @@ class AgentTransferable(Dataset):
             current_x=current_info.wrist_x_normalized, future_x=future_x,
             current_y=current_info.wrist_y_normalized, future_y=future_y,
             current_depth=current_info.hand_depth_normalized, future_depth=future_depth,
+            current_depth_real=current_info.hand_depth_real, future_depth_real=future_depth_real,
             current_ori=current_info.wrist_orientation, future_ori=future_ori,
             current_contact=current_info.contact, future_contact=future_contact,
             current_img_shape=current_info.img_shape, future_img_shape=future_img_shape,
@@ -1178,7 +1208,8 @@ if __name__ == '__main__':
             num_cpus=0,
             has_task_labels=False,
             has_future_labels=False,
-            load_robot_r3m=load_robot_r3m
+            load_robot_r3m=load_robot_r3m,
+            load_real_depth=True
         )
         end = time.time()
         print(f'Loaded data. Time: {end - start}')
@@ -1196,7 +1227,10 @@ if __name__ == '__main__':
             t1 = time.time()
             print(f'dataloader time: {t1 - t0}s')
             print(f'current_x: \n{data.current_x}')
+            print(f'future_depth: {data.current_depth}')
             print(f'future_depth: {data.future_depth}')
+            print(f'current_depth_real: {data.current_depth_real}')
+            print(f'future_depth_real: {data.future_depth_real}')
             print(f'current_contact: {data.current_contact}')
             print(f'future_ori: {data.future_ori}')
             if step == 0:
