@@ -22,6 +22,19 @@ def load_img_from_hand_info(hand_info, robot_demos, run_on_cv_server):
     if img_path[:8] == '/scratch' and run_on_cv_server:
         img_path = '/home' + img_path[8:]
 
+    # temporary solution: fix the path in a hard-coding way
+    if not osp.exists(img_path):
+        # change 'Datasets' to 'WidowX_Datasets'
+        img_path_splits = img_path.split('/')
+        img_path_splits[3] = 'WidowX_Datasets'
+        img_path = '/'.join(img_path_splits)
+    if not osp.exists(img_path):
+        # change 'WidowX_Datasets' to 'Franka_Datasets'
+        img_path_splits = img_path.split('/')
+        img_path_splits[3] = 'WidowX_Datasets'
+        img_path = '/'.join(img_path_splits)
+    assert osp.exists(img_path), f'Image path does not exist: {img_path}'
+
     if robot_demos:
         # replace frames with robot_frames
         img_path = '/' + osp.join(*list(map(lambda x: x.replace('frames', 'robot_frames'), img_path.split('/'))))
@@ -348,6 +361,7 @@ def generate_transferable_visualization(
         current_img=None,
         future_img=None,
         original_task=False,
+        vis_robot=False,
         log_metric=False,
         passed_metric=False,
         current_depth=None,
@@ -366,7 +380,7 @@ def generate_transferable_visualization(
     if current_img is None:
         current_img = load_img_from_hand_info(
             hand_info=current_hand_info,
-            robot_demos=False,
+            robot_demos=vis_robot,
             run_on_cv_server=run_on_cv_server
         )
     current_rendered_img = render_bbox_and_hand_pose(
@@ -430,7 +444,7 @@ def generate_transferable_visualization(
         if future_img is None:
             future_img = load_img_from_hand_info(
                 hand_info=future_hand_info,
-                robot_demos=False,
+                robot_demos=vis_robot,
                 run_on_cv_server=run_on_cv_server
             )
         future_rendered_img = render_bbox_and_hand_pose(
