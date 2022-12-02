@@ -275,7 +275,8 @@ def process_transferable_mocap_pred(
         mocap_pred_path, hand,
         depth_norm_params, ori_norm_params,
         mocap_pred=None,
-        depth_descriptor='scaling_factor'
+        depth_descriptor='scaling_factor',
+        depth_real_path=None
 ):
     assert mocap_pred_path is not None or mocap_pred is not None
     if mocap_pred is None:
@@ -317,10 +318,20 @@ def process_transferable_mocap_pred(
     hand_depth_normalized = zscore_normalize(hand_depth_estimate, depth_norm_params)
     wrist_orientation_normalized = zscore_normalize(hand_pose[:3], ori_norm_params)
 
+    wrist_depth_real = -999  # value for invalid depth due to out of bound wrist joint
+    if depth_real_path is not None:
+        if (0 <= wrist_x_float < img_x) and (0 <= wrist_y_float < img_y):
+            wrist_coord = wrist_coord.round().astype(np.int16)
+            wrist_x, wrist_y = wrist_coord
+            if wrist_x != img_x and wrist_y != img_y:
+                depth_real = np.load(depth_real_path)
+                wrist_depth_real = depth_real[wrist_y, wrist_x].astype(np.int16)
+
     info = namedtuple('info', [
         'wrist_x_normalized',
         'wrist_y_normalized',
         'hand_depth_normalized',
+        'hand_depth_real',
         'wrist_orientation',
         'contact',
         'img_shape'
@@ -330,6 +341,7 @@ def process_transferable_mocap_pred(
         wrist_x_normalized=wrist_x_normalized,
         wrist_y_normalized=wrist_y_normalized,
         hand_depth_normalized=hand_depth_normalized,
+        hand_depth_real=wrist_depth_real,
         wrist_orientation=wrist_orientation_normalized,
         contact=contact,
         img_shape=img_shape
