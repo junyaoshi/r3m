@@ -10,11 +10,10 @@ import torch
 import matplotlib.pyplot as plt
 
 from utils.bc_utils import (
-    unnormalize_bbox, normalize_bbox,
-    zscore_normalize, zscore_unnormalize,
-    load_pkl, evaluate_metric
+    evaluate_metric
 )
-from utils.depth_utils import scaling_factor_depth
+from utils.data_utils import normalize_bbox, unnormalize_bbox, load_pkl, zscore_normalize, zscore_unnormalize, \
+    scaling_factor_depth
 
 
 def load_img_from_hand_info(hand_info, robot_demos, run_on_cv_server):
