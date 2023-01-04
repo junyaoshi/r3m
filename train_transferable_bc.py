@@ -16,10 +16,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import AgentTransferable
 from utils.bc_utils import (
-    count_parameters_in_M, AvgrageMeter, load_pkl,
-    evaluate_transferable_metric, evaluate_transferable_metric_batch,
-    CV_TASKS, CLUSTER_TASKS
+    count_parameters_in_M, AvgrageMeter, evaluate_transferable_metric, evaluate_transferable_metric_batch
 )
+from utils.data_utils import CV_TASKS, CLUSTER_TASKS, load_pkl
 from bc_models.resnet import EndtoEndNet
 from utils.vis_utils import generate_transferable_visualization
 
@@ -50,6 +49,13 @@ def parse_args():
                         help="descriptor for estimating hand depth")
     parser.add_argument('--no_shuffle', action='store_true',
                         help='if true, dataloader is not shuffled')
+    parser.add_argument("--stage", type=str, default="all",
+                        choices=[
+                            'all',  # use all data
+                            'pre',  # use pre-interaction data
+                            'during' # use during-interaction data
+                        ],
+                        help="stage used to filter the dataset")
 
     # training and evaluation
     parser.add_argument('--lr', type=float, default=0.001,
@@ -212,6 +218,7 @@ def main(args):
         split='train',
         iou_thresh=args.iou_thresh,
         time_interval=args.time_interval,
+        stage=args.stage,
         depth_descriptor=args.depth_descriptor,
         depth_norm_params=args.depth_norm_params,
         ori_norm_params=args.ori_norm_params,
@@ -239,6 +246,7 @@ def main(args):
             split='valid',
             iou_thresh=args.iou_thresh,
             time_interval=args.time_interval,
+            stage=args.stage,
             depth_descriptor=args.depth_descriptor,
             depth_norm_params=args.depth_norm_params,
             ori_norm_params=args.ori_norm_params,

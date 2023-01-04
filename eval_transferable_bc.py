@@ -16,11 +16,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import AgentTransferable
 from utils.bc_utils import (
-    count_parameters_in_M, AvgrageMeter, load_pkl,
-    evaluate_transferable_metric, evaluate_transferable_metric_batch,
-    CLUSTER_TASKS,
-    zscore_unnormalize
+    count_parameters_in_M, AvgrageMeter, evaluate_transferable_metric, evaluate_transferable_metric_batch
 )
+from utils.data_utils import CLUSTER_TASKS, load_pkl, zscore_unnormalize
 from bc_models.resnet import EndtoEndNet
 from utils.vis_utils import generate_transferable_visualization
 
@@ -44,6 +42,13 @@ def parse_args():
                         help='set to true if dataset has task labels')
     parser.add_argument('--has_future_labels', action='store_true',
                         help='set to true if dataset has future labels')
+    parser.add_argument("--stage", type=str, default="all",
+                        choices=[
+                            'all',  # use all data, should also use this if using lab snapshot demo data
+                            'pre',  # use pre-interaction data
+                            'during'  # use during-interaction data
+                        ],
+                        help="stage used to filter the dataset")
 
     # eval
     parser.add_argument('--eval_tasks', action='store_true',
@@ -163,6 +168,7 @@ def main(eval_args):
         split=None if eval_args.split == 'None' else eval_args.split,
         iou_thresh=eval_args.iou_thresh,
         time_interval=eval_args.time_interval,
+        stage=eval_args.stage,
         depth_descriptor=args.depth_descriptor,
         depth_norm_params=args.depth_norm_params,
         ori_norm_params=args.ori_norm_params,
