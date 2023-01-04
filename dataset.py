@@ -5,19 +5,18 @@ import time
 from os.path import join
 from copy import deepcopy
 from collections import namedtuple
-
-import numpy as np
-from tqdm import tqdm
 import pickle
 import multiprocessing as mp
 
+import numpy as np
+from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset
 
-from utils.bc_utils import (
-    determine_which_hand, normalize_bbox, load_pkl,
+from utils.data_utils import (
+    CLUSTER_TASKS, determine_which_hand, normalize_bbox, load_pkl,
     process_mocap_pred, process_transferable_mocap_pred,
-    CLUSTER_TASKS
+    check_contact_sequence, filter_frames_by_stage
 )
 
 item = namedtuple('item', [
@@ -475,18 +474,20 @@ class SomethingSomethingDemosR3M(Dataset):
 class AgentTransferable(Dataset):
     def __init__(self, data_home_dirs,
                  task_names=None, split=None,
-                 iou_thresh=0.7, time_interval=5,
+                 iou_thresh=0.7, time_interval=5, stage='all',
                  depth_descriptor='scaling_factor', depth_norm_params=None, ori_norm_params=None,
                  debug=False, run_on_cv_server=False, num_cpus=4,
-                 has_task_labels=True, has_future_labels=True, load_robot_r3m=False, load_real_depth=False):
+                 has_task_labels=True, has_future_labels=True,
+                 load_robot_r3m=False, load_real_depth=False):
         """
-        Set num_cpus=1 to disable multiprocessing
+        Set num_cpus=1 or num_cpus=0 to disable multiprocessing
         """
         self.data_home_dirs = data_home_dirs
         self.task_names = task_names if has_task_labels else []
         self.split = split
         self.iou_thresh = iou_thresh
         self.time_interval = time_interval
+        self.stage = stage
         self.depth_descriptor = depth_descriptor
         self.depth_norm_params = depth_norm_params
         self.ori_norm_params = ori_norm_params
@@ -503,6 +504,10 @@ class AgentTransferable(Dataset):
 
         assert depth_norm_params is not None and ori_norm_params is not None, "Normalization params cannot be None"
         assert split in ['train', 'valid', None]
+        assert stage in ['pre', 'during', 'all']  # using pre-interaction, during-interaction, or all data
+        if not has_future_labels:
+            assert stage == 'all', 'Cannot filter snapshot image data using stage, set stage to "all"'
+
         if has_task_labels:
             print(f'Initializing dataset for tasks: \n{task_names}.')
             self.task_dict = {task_name: int(i) for i, task_name in enumerate(task_names)}
@@ -510,19 +515,21 @@ class AgentTransferable(Dataset):
             print(f'Initializing dataset.')
         if split is not None:
             print(f'Split: {"train" if split == "train" else "valid"}')
+        print(f'Stage: {stage}')
 
         (
             self.r3m_paths, self.tasks, self.hands,
             self.current_hand_pose_paths, self.future_hand_pose_paths,
             self.current_depth_paths, self.future_depth_paths
-        ) = self.fetch_data(num_cpus=num_cpus)
+        ) = self.fetch_data_mp(num_cpus=num_cpus)
 
         print(f'Dataset has {len(self)} data.')
 
     def __len__(self):
         return len(self.r3m_paths)
 
-    def fetch_data(self, num_cpus):
+    def fetch_data_mp(self, num_cpus):
+        """Fetch data using multiprocessing"""
         if not self.has_task_labels:
             assert num_cpus == 1 or num_cpus == 0, 'Does not support multiprocessing when there are no task labels'
         if len(self.data_home_dirs) > 1:
@@ -534,14 +541,16 @@ class AgentTransferable(Dataset):
                 r3m_paths, tasks, hands,
                 current_hand_pose_paths, future_hand_pose_paths,
                 current_depth_paths, future_depth_paths
-            ) = self.single_process_fetch_data(self.task_names)
+            ) = self.fetch_data(self.task_names)
         elif num_cpus == 1 or num_cpus == 0:
+            # num_cpus=1 or num_cpus=0 => use single process
             (
                 r3m_paths, tasks, hands,
                 current_hand_pose_paths, future_hand_pose_paths,
                 current_depth_paths, future_depth_paths
-            ) = self.single_process_fetch_data(self.task_names)
+            ) = self.fetch_data(self.task_names)
         else:
+            # compile multiprocessing args list
             mp_splits, n_tasks_left, n_cpus_left = [0], self.num_tasks, num_cpus
             while n_tasks_left:
                 tasks_assigned = math.ceil(n_tasks_left / n_cpus_left)
@@ -553,10 +562,10 @@ class AgentTransferable(Dataset):
             print(f'Number of processes: {num_cpus}')
             print(f'Splits for multiprocessing: \n{args_list}')
 
-            # multiprocessing (num_cpus processes)
+            # perform multiprocessing (num_cpus processes)
             pool = mp.Pool(num_cpus)
             with pool as p:
-                r = list(tqdm(p.imap(self.single_process_fetch_data, args_list), total=num_cpus))
+                r = list(tqdm(p.imap(self.fetch_data, args_list), total=num_cpus))
             r3m_paths, tasks, hands = [], [], []
             current_hand_pose_paths, future_hand_pose_paths = [], []
             current_depth_paths, future_depth_paths = [], []
@@ -580,15 +589,19 @@ class AgentTransferable(Dataset):
             current_depth_paths, future_depth_paths
         )
 
-    def single_process_fetch_data(self, task_names):
+    def fetch_data(self, task_names):
         r3m_paths, tasks, hands = [], [], []
         current_hand_pose_paths, future_hand_pose_paths = [], []
         current_depth_paths, future_depth_paths = [], []
+
+        filter_sequence_by_contact = self.stage != 'all'
+
         for data_home_dir in self.data_home_dirs:
             if not self.has_task_labels:
                 task_names = [None]
             for task_name in task_names:
                 if task_name is None:
+                    # no task label, process entire data home dir
                     split_dir = data_home_dir
                     print(f'Processing directory: {split_dir}')
                 else:
@@ -605,38 +618,38 @@ class AgentTransferable(Dataset):
                     f.close()
 
                 for vid_num in tqdm(json_dict, desc='Going through videos...'):
-                    r3m_vid_dir = join(r3m_dir, vid_num)
-                    mocap_vid_dir = join(split_dir, 'mocap_output', vid_num, 'mocap')
-                    depths_vid_dir = join(depths_dir, vid_num)
-
                     # handle debug mode
                     if self.debug and len(r3m_paths) > 600:
                         break
 
-                    for current_frame_num in json_dict[vid_num]:
-                        # check if future frame exists
-                        future_frame_num = str(int(current_frame_num) + self.time_interval)
-                        if future_frame_num not in json_dict[vid_num] and self.has_future_labels:
-                            continue
+                    r3m_vid_dir = join(r3m_dir, vid_num)
+                    mocap_vid_dir = join(split_dir, 'mocap_output', vid_num, 'mocap')
+                    depths_vid_dir = join(depths_dir, vid_num)
 
-                        # check if current and future frames have the same hand
-                        current_hand_pose_path = join(mocap_vid_dir, f'frame{current_frame_num}_prediction_result.pkl')
-                        with open(current_hand_pose_path, 'rb') as f:
-                            current_hand_info = pickle.load(f)
+                    frame_pairs, contact_sequence, vid_data_dict = [], {}, {}
+                    for cur_frame_str in json_dict[vid_num]:
+                        current_hand_pose_path = join(mocap_vid_dir, f'frame{cur_frame_str}_prediction_result.pkl')
+                        current_hand_info = load_pkl(current_hand_pose_path)
                         current_hand = determine_which_hand(current_hand_info)
+                        cur_frame = int(cur_frame_str)
+                        next_frame_str = str(cur_frame + self.time_interval)
+                        future_hand_pose_path = join(
+                            mocap_vid_dir, f'frame{next_frame_str}_prediction_result.pkl'
+                        )
 
+                        if filter_sequence_by_contact:
+                            contact_sequence[cur_frame] = current_hand_info['contact_filtered']
 
                         if self.has_future_labels:
-                            future_hand_pose_path = join(mocap_vid_dir, f'frame{future_frame_num}_prediction_result.pkl')
-                            with open(future_hand_pose_path, 'rb') as f:
-                                future_hand_info = pickle.load(f)
+                            # check if future frame exists
+                            if next_frame_str not in json_dict[vid_num]:
+                                continue
+
+                            # check if current and future frames have the same hand
+                            future_hand_info = load_pkl(future_hand_pose_path)
                             future_hand = determine_which_hand(future_hand_info)
                             if current_hand != future_hand:
                                 continue
-                            future_hand_pose_paths.append(future_hand_pose_path)
-                            if self.load_real_depth:
-                                future_depth_path = join(depths_vid_dir, f'frame{future_frame_num}.npy')
-                                future_depth_paths.append(future_depth_path)
 
                         if self.has_task_labels:
                             task = np.zeros(self.num_tasks)
@@ -644,13 +657,44 @@ class AgentTransferable(Dataset):
                         else:
                             task = 0  # placeholder for no task labels
 
-                        hands.append(current_hand)
-                        r3m_paths.append(join(r3m_vid_dir, f'frame{current_frame_num}_r3m.pkl'))
-                        tasks.append(task)
-                        current_hand_pose_paths.append(current_hand_pose_path)
+                        # load info into vid_data_dict
+                        vid_data_dict[cur_frame] = {}
+                        vid_data_dict[cur_frame]['hand'] = current_hand
+                        vid_data_dict[cur_frame]['r3m_path'] = join(r3m_vid_dir, f'frame{cur_frame_str}_r3m.pkl')
+                        vid_data_dict[cur_frame]['task'] = task
+                        vid_data_dict[cur_frame]['cur_hand_path'] = current_hand_pose_path
+                        if self.has_future_labels:
+                            vid_data_dict[cur_frame]['next_hand_path'] = future_hand_pose_path
                         if self.load_real_depth:
-                            current_depth_path = join(depths_vid_dir, f'frame{current_frame_num}.npy')
-                            current_depth_paths.append(current_depth_path)
+                            current_depth_path = join(depths_vid_dir, f'frame{cur_frame_str}.npy')
+                            vid_data_dict[cur_frame]['cur_depth_path'] = current_depth_path
+                            if self.has_future_labels:
+                                future_depth_path = join(depths_vid_dir, f'frame{next_frame_str}.npy')
+                                vid_data_dict[cur_frame]['next_depth_path'] = future_depth_path
+
+                    data_frames = list(vid_data_dict.keys())
+                    if filter_sequence_by_contact:
+                        # determine if video has valid contact sequence
+                        contact_sequence = dict(sorted(contact_sequence.items()))
+                        valid, first_contact_frame, last_contact_frame = check_contact_sequence(contact_sequence)
+                        if not valid:
+                            continue
+
+                        data_frames = filter_frames_by_stage(
+                            data_frames, first_contact_frame, last_contact_frame, self.stage
+                        )
+
+                    # extend overall data lists with newly processed data from the video
+                    r3m_paths.extend([vid_data_dict[f]['r3m_path'] for f in data_frames])
+                    tasks.extend([vid_data_dict[f]['task'] for f in data_frames])
+                    hands.extend([vid_data_dict[f]['hand'] for f in data_frames])
+                    current_hand_pose_paths.extend([vid_data_dict[f]['cur_hand_path'] for f in data_frames])
+                    if self.has_future_labels:
+                        future_hand_pose_paths.extend([vid_data_dict[f]['next_hand_path'] for f in data_frames])
+                    if self.load_real_depth:
+                        current_depth_paths.extend([vid_data_dict[f]['cur_depth_path'] for f in data_frames])
+                        if self.has_future_labels:
+                            future_depth_paths.extend([vid_data_dict[f]['next_depth_path'] for f in data_frames])
 
         return (
             r3m_paths, tasks, hands,
@@ -669,9 +713,10 @@ class AgentTransferable(Dataset):
             depth_real_path=depth_path
         )
 
-    def count_contact(self):
+    def count_contact_mp(self):
+        """Count contact pos & neg using multiprocessing"""
         if self.num_cpus == 0 or self.num_cpus == 1:
-            n_pos, n_neg, n_total = self.single_process_count_contact(self.task_names)
+            n_pos, n_neg, n_total = self.count_contact(self.task_names)
         else:
             mp_splits, n_data_left, n_cpus_left = [0], len(self), num_cpus
             while n_data_left:
@@ -688,7 +733,7 @@ class AgentTransferable(Dataset):
             # multiprocessing (num_cpus processes)
             pool = mp.Pool(num_cpus)
             with pool as p:
-                r = list(tqdm(p.imap(self.single_process_count_contact, args_list), total=num_cpus))
+                r = list(tqdm(p.imap(self.count_contact, args_list), total=num_cpus))
 
             n_pos, n_neg, n_total = 0, 0, 0
             for process_r in r:
@@ -699,7 +744,7 @@ class AgentTransferable(Dataset):
 
         return n_pos, n_neg, n_total
 
-    def single_process_count_contact(self, indices):
+    def count_contact(self, indices):
         n_pos, n_neg, n_total = 0, 0, 0
         for idx in indices:
             future_hand_pose_path = self.future_hand_pose_paths[idx]
@@ -770,16 +815,16 @@ if __name__ == '__main__':
     run_on_cv_server = True
     num_cpus = 1
     batch_size = 4
-    time_interval = 15
+    time_interval = 10
     test_ss_r3m = False
     test_ss_hand_demos_r3m = False
     test_ss_robot_demos_r3m = False
     test_ss_same_hand_demos_r3m = False
     test_franka_hand_demos_r3m = False
-    test_transferable = False
+    test_transferable = True
     test_count_contact = False
     count_contact = False
-    test_trasnferable_demos = True
+    test_trasnferable_demos = False
 
     if test_ss_r3m:
         # test SomethingSomethingR3M
@@ -1042,6 +1087,7 @@ if __name__ == '__main__':
             task_names=CLUSTER_TASKS,
             split='valid',
             time_interval=time_interval,
+            stage='pre',
             depth_norm_params=depth_norm_params,
             ori_norm_params=ori_norm_params,
             debug=debug,
@@ -1117,7 +1163,7 @@ if __name__ == '__main__':
         print(f'Loaded valid data. Time: {end - start}')
         print(f'Number of valid data: {len(valid_data)}')
 
-        n_pos, n_neg, n_total = valid_data.count_contact()
+        n_pos, n_neg, n_total = valid_data.count_contact_mp()
         print(f'Count contact results:')
         print(f'Total: {n_total}; Positive: {n_pos}; Negative: {n_neg}')
 
@@ -1170,7 +1216,7 @@ if __name__ == '__main__':
             print(f'Loaded {split} data. Time: {end - start:.4f}')
             print(f'Number of {split} data: {len(data)}')
 
-            split_n_pos, split_n_neg, split_n_total = data.count_contact()
+            split_n_pos, split_n_neg, split_n_total = data.count_contact_mp()
             print(f'Split: {split}; Total: {split_n_total}; Positive: {split_n_pos}; Negative: {split_n_neg}')
             contact_count['n_total'] += split_n_total
             contact_count['n_pos'] += split_n_pos
