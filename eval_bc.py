@@ -19,13 +19,9 @@ from dataset import (
 from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
 from utils.bc_utils import (
     count_parameters_in_M,
-    pose_to_joint_depth,
-    unnormalize_bbox,
-    CV_TASKS, CLUSTER_TASKS,
-    cv_task_to_cluster_task,
-    cluster_task_to_cv_task,
-
 )
+from utils.data_utils import CV_TASKS, CLUSTER_TASKS, cv_task_to_cluster_task, cluster_task_to_cv_task, \
+    unnormalize_bbox, pose_to_joint_depth
 from utils.vis_utils import generate_single_visualization, load_img_from_hand_info
 
 def parse_args():

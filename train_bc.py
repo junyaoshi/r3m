@@ -13,11 +13,9 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import SomethingSomethingR3M
 from utils.bc_utils import (
     count_parameters_in_M,
-    AvgrageMeter,
-    pose_to_joint_depth,
-    CV_TASKS,
-    CLUSTER_TASKS
+    AvgrageMeter
 )
+from utils.data_utils import CV_TASKS, CLUSTER_TASKS, pose_to_joint_depth
 from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
 from utils.vis_utils import generate_single_visualization
 
