@@ -13,10 +13,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils.save_r3m_for_ss_frame import setup_r3m, save_r3m
 from utils.bc_utils import (
-    determine_which_hand, process_mocap_pred, cluster_task_to_cv_task,
-    load_eval_bc_model_and_args, generate_single_visualization,
-    estimate_depth, CLUSTER_TASKS
+    load_eval_bc_model_and_args, generate_single_visualization
 )
+from utils.data_utils import CLUSTER_TASKS, cluster_task_to_cv_task, determine_which_hand, process_mocap_pred, \
+    estimate_depth
 
 
 def parse_eval_args():
