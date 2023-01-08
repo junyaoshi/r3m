@@ -20,7 +20,7 @@ from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
 from utils.bc_utils import (
     count_parameters_in_M,
 )
-from utils.data_utils import CV_TASKS, CLUSTER_TASKS, cv_task_to_cluster_task, cluster_task_to_cv_task, \
+from utils.data_utils import HALF_TASKS, ALL_TASKS, cv_task_to_cluster_task, cluster_task_to_cv_task, \
     unnormalize_bbox, pose_to_joint_depth
 from utils.vis_utils import generate_single_visualization, load_img_from_hand_info
 
@@ -129,12 +129,12 @@ def main(eval_args):
     checkpoint = torch.load(eval_args.checkpoint, map_location='cpu')
     args = checkpoint['args']
     pprint(f'loaded train args: \n{args}')
-    eval_task_names = CV_TASKS if eval_args.run_on_cv_server else CLUSTER_TASKS
+    eval_task_names = HALF_TASKS if eval_args.run_on_cv_server else ALL_TASKS
     if eval_args.dataset in demo_datasets:
-        eval_task_names = CLUSTER_TASKS
+        eval_task_names = ALL_TASKS
 
     # compute dimensions
-    r3m_dim, task_dim, cam_dim = 2048, len(CV_TASKS) if args.run_on_cv_server else len(CLUSTER_TASKS), 3
+    r3m_dim, task_dim, cam_dim = 2048, len(HALF_TASKS) if args.run_on_cv_server else len(ALL_TASKS), 3
     args.hand_bbox_dim, args.hand_pose_dim, args.hand_shape_dim = 4, 48, 10
     hand_dim = sum([args.hand_bbox_dim, args.hand_pose_dim, args.hand_shape_dim])
     input_dim = sum([r3m_dim, task_dim, hand_dim, cam_dim, cam_dim])

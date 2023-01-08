@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import Dataset
 
 from utils.data_utils import (
-    CLUSTER_TASKS, determine_which_hand, normalize_bbox, load_pkl,
+    ALL_TASKS, determine_which_hand, normalize_bbox, load_pkl,
     process_mocap_pred, process_transferable_mocap_pred,
     check_contact_sequence, filter_frames_by_stage
 )
@@ -482,7 +482,7 @@ class AgentTransferable(Dataset):
         """
         Set num_cpus=1 or num_cpus=0 to disable multiprocessing
         """
-        self.data_home_dirs = data_home_dirs
+        self.data_home_dirs = data_home_dirs if isinstance(data_home_dirs, list) else [data_home_dirs]
         self.task_names = task_names if has_task_labels else []
         self.split = split
         self.iou_thresh = iou_thresh
@@ -995,7 +995,7 @@ if __name__ == '__main__':
 
         start = time.time()
         data = SomethingSomethingDemosR3M(
-            CLUSTER_TASKS, data_home_dir=data_home_dir, time_interval=1,
+            ALL_TASKS, data_home_dir=data_home_dir, time_interval=1,
             debug=debug, run_on_cv_server=run_on_cv_server, demo_type='same_hand'
         )
         end = time.time()
@@ -1033,7 +1033,7 @@ if __name__ == '__main__':
 
         start = time.time()
         data = SomethingSomethingDemosR3M(
-            CLUSTER_TASKS, data_home_dir=data_home_dir,
+            ALL_TASKS, data_home_dir=data_home_dir,
             iou_thresh=0.6, time_interval=1,
             debug=debug, run_on_cv_server=run_on_cv_server,
             demo_type='robot', has_task_labels=False, has_future_labels=False
@@ -1084,7 +1084,7 @@ if __name__ == '__main__':
         start = time.time()
         valid_data = AgentTransferable(
             data_home_dirs=[data_home_dir],
-            task_names=CLUSTER_TASKS,
+            task_names=ALL_TASKS,
             split='valid',
             time_interval=time_interval,
             stage='pre',
@@ -1243,7 +1243,7 @@ if __name__ == '__main__':
         start = time.time()
         data = AgentTransferable(
             data_home_dirs=data_home_dirs,
-            task_names=CLUSTER_TASKS,
+            task_names=ALL_TASKS,
             split=None,
             iou_thresh=0.6,
             time_interval=time_interval,

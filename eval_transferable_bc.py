@@ -16,9 +16,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import AgentTransferable
 from utils.bc_utils import (
-    count_parameters_in_M, AvgrageMeter, evaluate_transferable_metric, evaluate_transferable_metric_batch
+    count_parameters_in_M, AverageMeter, evaluate_transferable_metric, evaluate_transferable_metric_batch
 )
-from utils.data_utils import CLUSTER_TASKS, load_pkl, zscore_unnormalize
+from utils.data_utils import ALL_TASKS, load_pkl, zscore_unnormalize
 from bc_models.resnet import EndtoEndNet
 from utils.vis_utils import generate_transferable_visualization
 
@@ -106,7 +106,7 @@ def main(eval_args):
     assert eval_args.vis_sample_size <= eval_args.batch_size
     assert eval_args.task_vis_sample_size <= eval_args.batch_size
     eval_args.save = join(eval_args.root, eval_args.save)
-    eval_task_names = CLUSTER_TASKS
+    eval_task_names = ALL_TASKS
     eval_args.task_names = eval_task_names
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f'Device: {device}.')
@@ -227,28 +227,28 @@ def eval(
 ):
     model.eval()
 
-    epoch_loss = AvgrageMeter()
-    epoch_xy_loss = AvgrageMeter()
-    epoch_depth_loss = AvgrageMeter()
-    epoch_ori_loss = AvgrageMeter()
-    epoch_contact_loss = AvgrageMeter()
-    epoch_contact_acc = AvgrageMeter()
+    epoch_loss = AverageMeter()
+    epoch_xy_loss = AverageMeter()
+    epoch_depth_loss = AverageMeter()
+    epoch_ori_loss = AverageMeter()
+    epoch_contact_loss = AverageMeter()
+    epoch_contact_acc = AverageMeter()
 
     # using current hand info for prediction as baseline
-    epoch_cur_loss = AvgrageMeter()
-    epoch_cur_xy_loss = AvgrageMeter()
-    epoch_cur_depth_loss = AvgrageMeter()
-    epoch_cur_ori_loss = AvgrageMeter()
-    epoch_cur_contact_loss = AvgrageMeter()
-    epoch_cur_contact_acc = AvgrageMeter()
+    epoch_cur_loss = AverageMeter()
+    epoch_cur_xy_loss = AverageMeter()
+    epoch_cur_depth_loss = AverageMeter()
+    epoch_cur_ori_loss = AverageMeter()
+    epoch_cur_contact_loss = AverageMeter()
+    epoch_cur_contact_acc = AverageMeter()
 
     # using mean of batch for prediction as baseline
-    epoch_mean_loss = AvgrageMeter()
-    epoch_mean_xy_loss = AvgrageMeter()
-    epoch_mean_depth_loss = AvgrageMeter()
-    epoch_mean_ori_loss = AvgrageMeter()
-    epoch_mean_contact_loss = AvgrageMeter()
-    epoch_mean_contact_acc = AvgrageMeter()
+    epoch_mean_loss = AverageMeter()
+    epoch_mean_xy_loss = AverageMeter()
+    epoch_mean_depth_loss = AverageMeter()
+    epoch_mean_ori_loss = AverageMeter()
+    epoch_mean_contact_loss = AverageMeter()
+    epoch_mean_contact_acc = AverageMeter()
 
     epoch_metric_stats = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
     task_metric_stats = {task_name: {'total': 0, 'pred_success': 0} for task_name in task_names}

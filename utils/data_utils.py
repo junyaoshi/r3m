@@ -5,13 +5,14 @@ from os.path import join
 import numpy as np
 import torch
 
-CV_TASKS = [
+HALF_TASKS = [
     'push_left',
     'push_right',
     'move_down',
     'move_up',
 ]
-CLUSTER_TASKS = [
+
+ALL_TASKS = [
     'move_away',
     'move_towards',
     'move_down',
@@ -25,18 +26,18 @@ CLUSTER_TASKS = [
 
 def cv_task_to_cluster_task(cv_task):
     """Convert one-hot cv task to one-hot cluster task"""
-    task_name = CV_TASKS[torch.argmax(cv_task)]
-    cluster_task_idx = CLUSTER_TASKS.index(task_name)
-    cluster_task = torch.zeros(len(CLUSTER_TASKS))
+    task_name = HALF_TASKS[torch.argmax(cv_task)]
+    cluster_task_idx = ALL_TASKS.index(task_name)
+    cluster_task = torch.zeros(len(ALL_TASKS))
     cluster_task[cluster_task_idx] = 1
     return cluster_task
 
 
 def cluster_task_to_cv_task(cluster_task):
     """Convert one-hot cv task to one-hot cluster task"""
-    task_name = CLUSTER_TASKS[torch.argmax(cluster_task)]
-    cv_task_idx = CV_TASKS.index(task_name)
-    cv_task = torch.zeros(len(CV_TASKS))
+    task_name = ALL_TASKS[torch.argmax(cluster_task)]
+    cv_task_idx = HALF_TASKS.index(task_name)
+    cv_task = torch.zeros(len(HALF_TASKS))
     cv_task[cv_task_idx] = 1
     return cv_task
 
@@ -394,3 +395,15 @@ def estimate_depth(eval_args, args, hand_bbox):
         pred_hand_depth_estimate = 1. / pred_normalized_bbox_size
 
     return pred_hand_depth_estimate
+
+
+def get_sum_val(cur_v, pred_v, args):
+    return cur_v + pred_v if args.pred_residual else pred_v
+
+
+def get_target_val(next_v, cur_v, args):
+    return next_v - cur_v if args.pred_residual else next_v
+
+
+def get_res_val(pred_v, cur_v, args):
+    return pred_v if args.pred_residual else pred_v - cur_v

@@ -13,9 +13,9 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import SomethingSomethingR3M
 from utils.bc_utils import (
     count_parameters_in_M,
-    AvgrageMeter
+    AverageMeter
 )
-from utils.data_utils import CV_TASKS, CLUSTER_TASKS, pose_to_joint_depth
+from utils.data_utils import HALF_TASKS, ALL_TASKS, pose_to_joint_depth
 from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
 from utils.vis_utils import generate_single_visualization
 
@@ -122,7 +122,7 @@ def main(args):
     print(f'Predicting hand shape: {args.predict_hand_shape}.')
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f'Device: {device}.')
-    task_names = CV_TASKS if args.run_on_cv_server else CLUSTER_TASKS
+    task_names = HALF_TASKS if args.run_on_cv_server else ALL_TASKS
     writer = SummaryWriter(log_dir=args.save, flush_secs=60)
 
     # visualizer and frank mocap
@@ -323,14 +323,14 @@ def train(
         task_names, args
 ):
     model.train()
-    epoch_loss = AvgrageMeter()
-    epoch_hand_bbox_loss = AvgrageMeter()
-    epoch_hand_pose_loss = AvgrageMeter()
-    epoch_hand_shape_loss = AvgrageMeter()
-    epoch_bl_loss = AvgrageMeter()
-    epoch_bl_hand_bbox_loss = AvgrageMeter()
-    epoch_bl_hand_pose_loss = AvgrageMeter()
-    epoch_bl_hand_shape_loss = AvgrageMeter()
+    epoch_loss = AverageMeter()
+    epoch_hand_bbox_loss = AverageMeter()
+    epoch_hand_pose_loss = AverageMeter()
+    epoch_hand_shape_loss = AverageMeter()
+    epoch_bl_loss = AverageMeter()
+    epoch_bl_hand_bbox_loss = AverageMeter()
+    epoch_bl_hand_pose_loss = AverageMeter()
+    epoch_bl_hand_shape_loss = AverageMeter()
 
     for step, data in tqdm(enumerate(train_queue), desc='Going through train data...'):
         (
@@ -519,14 +519,14 @@ def test(
         visualizer, hand_mocap_vis, hand_mocap_depth,
         task_names, args
 ):
-    epoch_loss = AvgrageMeter()
-    epoch_hand_bbox_loss = AvgrageMeter()
-    epoch_hand_pose_loss = AvgrageMeter()
-    epoch_hand_shape_loss = AvgrageMeter()
-    epoch_bl_loss = AvgrageMeter()
-    epoch_bl_hand_bbox_loss = AvgrageMeter()
-    epoch_bl_hand_pose_loss = AvgrageMeter()
-    epoch_bl_hand_shape_loss = AvgrageMeter()
+    epoch_loss = AverageMeter()
+    epoch_hand_bbox_loss = AverageMeter()
+    epoch_hand_pose_loss = AverageMeter()
+    epoch_hand_shape_loss = AverageMeter()
+    epoch_bl_loss = AverageMeter()
+    epoch_bl_hand_bbox_loss = AverageMeter()
+    epoch_bl_hand_pose_loss = AverageMeter()
+    epoch_bl_hand_shape_loss = AverageMeter()
     model.eval()
 
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):

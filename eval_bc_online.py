@@ -17,7 +17,7 @@ from utils.save_r3m_for_ss_frame import setup_r3m, save_r3m
 from utils.bc_utils import (
     load_eval_bc_model_and_args
 )
-from utils.data_utils import CLUSTER_TASKS, cluster_task_to_cv_task, determine_which_hand, process_mocap_pred, \
+from utils.data_utils import ALL_TASKS, cluster_task_to_cv_task, determine_which_hand, process_mocap_pred, \
     estimate_depth
 from utils.vis_utils import generate_single_visualization
 
@@ -185,7 +185,7 @@ def main(eval_args):
     # set up BC
     writer = SummaryWriter(log_dir=eval_args.save, flush_secs=60)
     model, args = load_eval_bc_model_and_args(eval_args, device)
-    eval_task_names = CLUSTER_TASKS
+    eval_task_names = ALL_TASKS
     print(f'Evaluation task names: {eval_task_names}')
 
     frames_save_dir = osp.join(eval_args.data_save_dir, 'frames')
