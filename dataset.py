@@ -476,7 +476,7 @@ class AgentTransferable(Dataset):
                  task_names=None, split=None,
                  iou_thresh=0.7, time_interval=5, stage='all',
                  depth_descriptor='scaling_factor', depth_norm_params=None, ori_norm_params=None,
-                 debug=False, run_on_cv_server=False, num_cpus=4,
+                 debug=False, num_cpus=4,
                  has_task_labels=True, has_future_labels=True,
                  load_robot_r3m=False, load_real_depth=False):
         """
@@ -492,7 +492,6 @@ class AgentTransferable(Dataset):
         self.depth_norm_params = depth_norm_params
         self.ori_norm_params = ori_norm_params
         self.debug = debug
-        self.run_on_cv_server = run_on_cv_server
         self.num_cpus=num_cpus
         self.has_task_labels = has_task_labels
         self.has_future_labels = has_future_labels
@@ -535,8 +534,6 @@ class AgentTransferable(Dataset):
         if len(self.data_home_dirs) > 1:
             assert num_cpus == 1 or num_cpus == 0, 'Does not support multiprocessing when there are multiple data dirs'
         if self.debug:
-            if self.has_task_labels:
-                self.task_names = [self.task_names[0]]
             (
                 r3m_paths, tasks, hands,
                 current_hand_pose_paths, future_hand_pose_paths,
