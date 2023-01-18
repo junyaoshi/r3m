@@ -5,6 +5,7 @@ from os.path import join
 import os
 from pprint import pprint
 from collections import namedtuple
+import argparse
 
 import numpy as np
 import cv2
@@ -13,7 +14,7 @@ import matplotlib.pyplot as plt
 
 from bc_models.resnet import EndtoEndNet, PartiallyTransferableNet
 from utils.data_utils import HALF_TASKS, ALL_TASKS, xywh_to_xyxy, normalize_bbox, unnormalize_bbox, \
-    mocap_path_to_rendered_path, pose_to_joint_depth
+    mocap_path_to_rendered_path, pose_to_joint_depth, zscore_normalize
 
 
 EpochStats = namedtuple('epoch_stats', [
@@ -21,7 +22,7 @@ EpochStats = namedtuple('epoch_stats', [
 ])
 
 LossStats = namedtuple('loss_stats', [
-    'total_loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc'
+    'total_loss', 'total_unweighted_loss', 'xy_loss', 'depth_loss', 'ori_loss', 'contact_loss', 'contact_acc'
 ])
 
 
@@ -32,6 +33,17 @@ def count_parameters_in_M(model):
 def safe_div(a, b):
     """a/b, but returns 0 when b=0"""
     return a / b  if b != 0 else 0
+
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
 def load_eval_bc_model_and_args(eval_args, device):
@@ -245,69 +257,55 @@ def evaluate_metric(
             raise ValueError(f'Encountered unknown task name [{task_name}] during metric evaluation.')
 
 
-# def write_step_loss_to_tb(loss_stats, writer, global_step, baseline='None'):
-#     """Write step loss to tensorboard"""
-#     tag = 'train'
-#     if baseline == 'cur':
-#         tag += '_baseline_current'
-#     elif baseline == 'mean':
-#         tag += '_baseline_mean'
-#
-#     writer.add_scalar(f'{tag}/loss', loss_stats.total_loss, global_step)
-#     writer.add_scalar(f'{tag}/xy_loss', loss_stats.xy_loss, global_step)
-#     writer.add_scalar(f'{tag}/depth_loss', loss_stats.depth_loss, global_step)
-#     writer.add_scalar(f'{tag}/ori_loss', loss_stats.ori_loss, global_step)
-#     writer.add_scalar(f'{tag}/contact_loss', loss_stats.contact_loss, global_step)
-#     writer.add_scalar(f'{tag}/contact_acc', loss_stats.contact_acc, global_step)
-
-
-def write_loss_to_tb(loss_stats, writer, tb_step, tag):
+def write_loss_to_tb(loss_stats, writer, tb_step, tag, log_contact=False):
     """Write instance of LossStats to tensorboard"""
-    writer.add_scalar(f'{tag}/loss', loss_stats.total_loss, tb_step)
+    writer.add_scalar(f'{tag}/total_loss', loss_stats.total_loss, tb_step)
+    writer.add_scalar(f'{tag}/total_unweighted_loss', loss_stats.total_unweighted_loss, tb_step)
     writer.add_scalar(f'{tag}/xy_loss', loss_stats.xy_loss, tb_step)
     writer.add_scalar(f'{tag}/depth_loss', loss_stats.depth_loss, tb_step)
     writer.add_scalar(f'{tag}/ori_loss', loss_stats.ori_loss, tb_step)
-    writer.add_scalar(f'{tag}/contact_loss', loss_stats.contact_loss, tb_step)
-    writer.add_scalar(f'{tag}/contact_acc', loss_stats.contact_acc, tb_step)
+    if log_contact:
+        writer.add_scalar(f'{tag}/contact_loss', loss_stats.contact_loss, tb_step)
+        writer.add_scalar(f'{tag}/contact_acc', loss_stats.contact_acc, tb_step)
 
 
-def print_epoch_loss(loss_monitor, mode):
+def print_epoch_loss(loss_monitor, mode, log_contact=False):
     """Print instance of EpochLossMonitor"""
-    print(f'epoch {mode} loss: {loss_monitor.total_loss.avg}')
+    print(f'epoch {mode} total loss: {loss_monitor.total_loss.avg}')
+    print(f'epoch {mode} total unweighted loss: {loss_monitor.total_unweighted_loss.avg}')
     print(f'epoch {mode} xy loss: {loss_monitor.xy_loss.avg}')
     print(f'epoch {mode} depth loss: {loss_monitor.depth_loss.avg}')
     print(f'epoch {mode} orientation loss: {loss_monitor.ori_loss.avg}')
-    print(f'epoch {mode} contact loss: {loss_monitor.contact_loss.avg}')
-    print(f'epoch {mode} contact acc: {loss_monitor.contact_acc.avg}')
+    if log_contact:
+        print(f'epoch {mode} contact loss: {loss_monitor.contact_loss.avg}')
+        print(f'epoch {mode} contact acc: {loss_monitor.contact_acc.avg}')
 
 
-def write_epoch_loss_to_tb(loss_monitor, writer, tb_step, tag):
+def write_epoch_loss_to_tb(loss_monitor, writer, tb_step, tag, log_contact=False):
     """Write instance of EpochLossMonitor to tensorboard"""
-    writer.add_scalar(f'{tag}/loss', loss_monitor.total_loss.avg, tb_step)
+    writer.add_scalar(f'{tag}/total_loss', loss_monitor.total_loss.avg, tb_step)
+    writer.add_scalar(f'{tag}/total_unweighted_loss', loss_monitor.total_unweighted_loss.avg, tb_step)
     writer.add_scalar(f'{tag}/xy_loss', loss_monitor.xy_loss.avg, tb_step)
     writer.add_scalar(f'{tag}/depth_loss', loss_monitor.depth_loss.avg, tb_step)
     writer.add_scalar(f'{tag}/ori_loss', loss_monitor.ori_loss.avg, tb_step)
-    writer.add_scalar(f'{tag}/contact_loss', loss_monitor.contact_loss.avg, tb_step)
-    writer.add_scalar(f'{tag}/contact_acc', loss_monitor.contact_acc.avg, tb_step)
+    if log_contact:
+        writer.add_scalar(f'{tag}/contact_loss', loss_monitor.contact_loss.avg, tb_step)
+        writer.add_scalar(f'{tag}/contact_acc', loss_monitor.contact_acc.avg, tb_step)
 
 
-def write_epoch_stats_to_tb(args, writer, epoch, global_step):
+def write_epoch_stats_to_tb(args, writer, epoch, global_step, log_contact=False):
     """Write epoch statistics to tensorboard"""
     writer.add_scalar('stats/epoch_steps', global_step, epoch)
     writer.add_scalar('stats/lambda1', args.lambda1, epoch)
     writer.add_scalar('stats/lambda2', args.lambda2, epoch)
     writer.add_scalar('stats/lambda3', args.lambda3, epoch)
     writer.add_scalar('stats/lambda4', args.lambda4, epoch)
-    writer.add_scalar('stats/bce_pos_weight', args.bce_pos_weight, epoch)
-    writer.add_scalar('stats/bce_weight_mult', args.bce_weight_mult, epoch)
-
-#
-# def epoch_tb_logging(loss_monitor, BLcur_monitor, BLmean_monitor, args, writer, epoch, global_step, mode):
-#     """Write epoch information to tensorboard"""
-#
+    if log_contact:
+        writer.add_scalar('stats/bce_pos_weight', args.bce_pos_weight, epoch)
+        writer.add_scalar('stats/bce_weight_mult', args.bce_weight_mult, epoch)
 
 
-def process_contact_stats(current_contact, future_contact, pred_contact, contact_stats):
+def process_contact_stats(current_contact, future_contact, pred_contact, mean_contact, contact_stats):
     """Calculate contact accuracies and update contact statistics
     Return:
         contact_accs: (contact_acc, cur_contact_acc, mean_contact_acc)
@@ -341,7 +339,6 @@ def process_contact_stats(current_contact, future_contact, pred_contact, contact
     contact_stats['neg']['bl_cur'] += cur_n_neg
 
     # using mean of batch for prediction as baseline
-    mean_contact = torch.mean(future_contact).repeat(batch_size)
     mean_contact_binary = torch.round(torch.sigmoid(mean_contact))
     mean_contact_correct = (mean_contact_binary == future_contact).sum().float()
     mean_contact_acc = mean_contact_correct / batch_size
@@ -369,55 +366,46 @@ def process_baseline_loss(current_data, target_data, contact_accs, loss_funcs, a
         loss_stats
     """
     target_xy, target_depth, target_ori, future_contact = target_data
+    current_xy, current_depth, current_ori, current_contact = current_data
     cur_contact_acc, mean_contact_acc = contact_accs
     l2_loss_func, bce_loss_func = loss_funcs
     batch_size = target_xy.size(0)
 
     if mode == 'current':
-        current_xy, current_depth, current_ori, current_contact = current_data
-        cur_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
-        cur_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
-        cur_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
-
-        cur_xy_loss = l2_loss_func(cur_xy, target_xy)
-        cur_depth_loss = l2_loss_func(cur_depth, target_depth)
-        cur_ori_loss = l2_loss_func(cur_ori, target_ori)
-        cur_contact_loss = bce_loss_func(current_contact, future_contact)
-
-        cur_loss = args.lambda1 * cur_xy_loss + \
-                   args.lambda2 * cur_depth_loss + \
-                   args.lambda3 * cur_ori_loss + \
-                   args.lambda4 * cur_contact_loss
-        cur_loss_unweighted = cur_xy_loss + cur_depth_loss + cur_ori_loss + cur_contact_loss
-
-        loss_stats = LossStats(
-            total_loss=cur_loss_unweighted.data, xy_loss=cur_xy_loss.data, depth_loss=cur_depth_loss.data,
-            ori_loss=cur_ori_loss.data, contact_loss=cur_contact_loss.data, contact_acc=cur_contact_acc.data,
-        )
-
+        bl_xy = torch.zeros_like(current_xy) if args.pred_residual else current_xy
+        bl_depth = torch.zeros_like(current_depth) if args.pred_residual else current_depth
+        bl_ori = torch.zeros_like(current_ori) if args.pred_residual else current_ori
+        bl_contact = current_contact
+        bl_contact_acc = cur_contact_acc
     elif mode == 'mean':
-        mean_xy = torch.mean(target_xy, dim=0).unsqueeze(0).repeat(batch_size, 1)
-        mean_depth = torch.mean(target_depth).repeat(batch_size)
-        mean_ori = torch.mean(target_ori, dim=0).unsqueeze(0).repeat(batch_size, 1)
-        mean_contact = torch.mean(future_contact).repeat(batch_size)
-
-        mean_xy_loss = l2_loss_func(mean_xy, target_xy)
-        mean_depth_loss = l2_loss_func(mean_depth, target_depth)
-        mean_ori_loss = l2_loss_func(mean_ori, target_ori)
-        mean_contact_loss = bce_loss_func(mean_contact, future_contact)
-        mean_loss = args.lambda1 * mean_xy_loss + \
-                    args.lambda2 * mean_depth_loss + \
-                    args.lambda3 * mean_ori_loss + \
-                    args.lambda4 * mean_contact_loss
-        mean_loss_unweighted = mean_xy_loss + mean_depth_loss + mean_ori_loss + mean_contact_loss
-
-        loss_stats = LossStats(
-            total_loss=mean_loss_unweighted.data, xy_loss=mean_xy_loss.data, depth_loss=mean_depth_loss.data,
-            ori_loss=mean_ori_loss.data, contact_loss=mean_contact_loss.data, contact_acc=mean_contact_acc.data,
-        )
-
+        mean_x, mean_y = args.data_params['x']['mean'], args.data_params['y']['mean']
+        mean_xy = torch.tensor([[mean_x, mean_y]]).repeat(batch_size, 1).to(current_xy.device)
+        mean_contact = args.data_params['contact']['mean']
+        bl_xy = mean_xy - current_xy if args.pred_residual else mean_xy
+        # data is z-score normalized -> mean = 0
+        bl_depth = -current_depth if args.pred_residual else torch.zeros(batch_size)
+        bl_ori = -current_ori if args.pred_residual else torch.zeros(batch_size, 3)
+        bl_contact = torch.tensor(mean_contact).repeat(batch_size).to(current_contact.device) \
+            if args.pred_contact else None
+        bl_contact_acc = mean_contact_acc
     else:
         raise ValueError(f'Invalid mode: {mode}')
+
+    bl_xy_loss = l2_loss_func(bl_xy, target_xy)
+    bl_depth_loss = l2_loss_func(bl_depth, target_depth)
+    bl_ori_loss = l2_loss_func(bl_ori, target_ori)
+    bl_contact_loss = bce_loss_func(bl_contact, future_contact) if args.pred_contact else 0.
+
+    bl_loss = args.lambda1 * bl_xy_loss + \
+              args.lambda2 * bl_depth_loss + \
+              args.lambda3 * bl_ori_loss + \
+              args.lambda4 * bl_contact_loss
+    bl_loss_unweighted = bl_xy_loss + bl_depth_loss + bl_ori_loss + bl_contact_loss
+
+    loss_stats = LossStats(
+        total_loss=bl_loss, total_unweighted_loss=bl_loss_unweighted, xy_loss=bl_xy_loss, depth_loss=bl_depth_loss,
+        ori_loss=bl_ori_loss, contact_loss=bl_contact_loss if args.pred_contact else None, contact_acc=bl_contact_acc
+    )
 
     return loss_stats
 
@@ -463,131 +451,63 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
     ContactStats = stats.ContactStats
 
     # log train epoch stats
-    print_epoch_loss(EpochLoss, mode)
-    write_epoch_loss_to_tb(EpochLoss, writer, epoch, tag=f'{mode}_epoch')
-    write_epoch_loss_to_tb(BLcur, writer, epoch, tag=f'{mode}_epoch_baseline_current')
-    write_epoch_loss_to_tb(BLmean, writer, epoch, tag=f'{mode}_epoch_baseline_mean')
-    write_epoch_stats_to_tb(args, writer, epoch, global_step)
+    print_epoch_loss(EpochLoss, mode, log_contact=args.pred_contact)
+    write_epoch_loss_to_tb(EpochLoss, writer, epoch, tag=f'{mode}_epoch', log_contact=args.pred_contact)
+    write_epoch_loss_to_tb(BLcur, writer, epoch, tag=f'{mode}_epoch_baseline_current', log_contact=args.pred_contact)
+    write_epoch_loss_to_tb(BLmean, writer, epoch, tag=f'{mode}_epoch_baseline_mean', log_contact=args.pred_contact)
+    write_epoch_stats_to_tb(args, writer, epoch, global_step, log_contact=args.pred_contact)
 
-    # writer.add_scalar(f'{mode}_epoch_baseline_current/loss', stats.cur_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_current/xy_loss', stats.cur_xy_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_current/depth_loss', stats.cur_depth_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_current/ori_loss', stats.cur_ori_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_current/contact_loss', stats.cur_contact_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_current/contact_acc', stats.cur_contact_acc, epoch)
-    #
-    # writer.add_scalar(f'{mode}_epoch_baseline_mean/loss', stats.mean_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_mean/xy_loss', stats.mean_xy_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_mean/depth_loss', stats.mean_depth_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_mean/ori_loss', stats.mean_ori_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_mean/contact_loss', stats.mean_contact_loss, epoch)
-    # writer.add_scalar(f'{mode}_epoch_baseline_mean/contact_acc', stats.mean_contact_acc, epoch)
-    #
-    # if train:
-    #     writer.add_scalar('stats/epoch_steps', global_step, epoch)
-    #     writer.add_scalar('stats/lambda1', args.lambda1, epoch)
-    #     writer.add_scalar('stats/lambda2', args.lambda2, epoch)
-    #     writer.add_scalar('stats/lambda3', args.lambda3, epoch)
-    #     writer.add_scalar('stats/lambda4', args.lambda4, epoch)
-    #     writer.add_scalar('stats/bce_pos_weight', args.bce_pos_weight, epoch)
-    #     writer.add_scalar('stats/bce_weight_mult', args.bce_weight_mult, epoch)
-
-    # visualize metric evaluation success rate by bar plot
-    bar_width = 0.4
     fig_height = 10
     n_task = len(args.task_names)
+    if args.eval_metric:
+        # visualize metric evaluation success rate by bar plot
+        bar_width = 0.4
+        bar1 = np.arange(len(EpochMetric) + 1)
+        bar2 = [x + bar_width for x in bar1]
+        epoch_pred_success_rate = [safe_div(v['pred_success'], v['total']) for v in EpochMetric.values()]
+        epoch_gt_success_rate = [safe_div(v['gt_success'] , v['total']) for v in EpochMetric.values()]
+        total_sum = sum([v['total'] for v in EpochMetric.values()])
+        pred_success_sum = sum([v['pred_success'] for v in EpochMetric.values()])
+        gt_success_sum = sum([v['gt_success'] for v in EpochMetric.values()])
+        epoch_pred_success_rate.append(safe_div(pred_success_sum , total_sum))
+        epoch_gt_success_rate.append(safe_div(gt_success_sum, total_sum))
+        xticks = list(EpochMetric.keys())
+        xticks.append('total')
 
-    # fig = plt.figure(figsize=(2 * n_task , fig_height))
-    bar1 = np.arange(len(EpochMetric) + 1)
-    bar2 = [x + bar_width for x in bar1]
-    epoch_pred_success_rate = [safe_div(v['pred_success'], v['total']) for v in EpochMetric.values()]
-    epoch_gt_success_rate = [safe_div(v['gt_success'] , v['total']) for v in EpochMetric.values()]
-    total_sum = sum([v['total'] for v in EpochMetric.values()])
-    pred_success_sum = sum([v['pred_success'] for v in EpochMetric.values()])
-    gt_success_sum = sum([v['gt_success'] for v in EpochMetric.values()])
-    epoch_pred_success_rate.append(safe_div(pred_success_sum , total_sum))
-    epoch_gt_success_rate.append(safe_div(gt_success_sum, total_sum))
+        add_bar_plot_to_tb(
+            vals_list=[epoch_pred_success_rate, epoch_gt_success_rate], bars=[bar1, bar2], bar_labels=['pred', 'gt'],
+            colors=['peachpuff', 'lavender'], bar_width=bar_width, figsize=(2 * n_task , fig_height),
+            text_fontsize=13, ylim=[0, 1], axis_labels=('Tasks', 'Success rate'), title='1D Metric Evaluation',
+            tag=f'{mode}_metric/success_rate', epoch=epoch, writer=writer, xticks=xticks
+        )
 
-    # plt.bar(bar1, epoch_pred_success_rate, width=bar_width, color='peachpuff', label='pred')
-    # plt.bar(bar2, epoch_gt_success_rate, width=bar_width, color='lavender', label='gt')
-    # for b1, ps, b2, gs in zip(bar1, epoch_pred_success_rate, bar2, epoch_gt_success_rate):
-    #     plt.text(b1, ps / 2, f'{ps:.2f}', ha='center', fontsize=13)
-    #     plt.text(b2, gs / 2, f'{gs:.2f}', ha='center', fontsize=13)
-    # plt.xlabel('Tasks', fontweight='bold', size=13)
-    # plt.ylabel('Success rate', fontweight='bold', size=13)
-    xticks = list(EpochMetric.keys())
-    xticks.append('total')
-    # plt.xticks([r + bar_width / 2 for r in bar1], xticks)
-    # plt.ylim([0, 1])
-    # plt.title('1D Metric Evaluation')
-    # plt.legend()
-    # plt.tight_layout()
-    # writer.add_figure(f'{mode}_metric/success_rate', fig, epoch)
-    # plt.close(fig)
+        # visualize metric evaluation count by bar plot
+        bar_width = 0.25
+        pred_success = [v['pred_success'] for v in EpochMetric.values()]
+        gt_success = [v['gt_success'] for v in EpochMetric.values()]
+        total = [v['total'] for v in EpochMetric.values()]
+        bar1 = np.arange(len(EpochMetric))
+        bar2 = [x + bar_width for x in bar1]
+        bar3 = [x + bar_width for x in bar2]
 
-    add_bar_plot_to_tb(
-        vals_list=[epoch_pred_success_rate, epoch_gt_success_rate], bars=[bar1, bar2], bar_labels=['pred', 'gt'],
-        colors=['peachpuff', 'lavender'], bar_width=bar_width, figsize=(2 * n_task , fig_height),
-        text_fontsize=13, ylim=[0, 1], axis_labels=('Tasks', 'Success rate'), title='1D Metric Evaluation',
-        tag=f'{mode}_metric/success_rate', epoch=epoch, writer=writer, xticks=xticks
-    )
-
-    # visualize metric evaluation count by bar plot
-    bar_width = 0.25
-    # fig = plt.figure(figsize=(3 * n_task, fig_height))
-    pred_success = [v['pred_success'] for v in EpochMetric.values()]
-    gt_success = [v['gt_success'] for v in EpochMetric.values()]
-    total = [v['total'] for v in EpochMetric.values()]
-    bar1 = np.arange(len(EpochMetric))
-    bar2 = [x + bar_width for x in bar1]
-    bar3 = [x + bar_width for x in bar2]
-
-    # plt.bar(bar1, pred_success, color='peachpuff', width=bar_width, label='pred success')
-    # plt.bar(bar2, gt_success, color='lavender', width=bar_width, label='gt success')
-    # plt.bar(bar3, total, color='skyblue', width=bar_width, label='total')
-    # for b1, ps, b2, gs, b3, t in zip(bar1, pred_success, bar2, gt_success, bar3, total):
-    #     plt.text(b1, ps / 2, ps, ha='center', fontsize=8)
-    #     plt.text(b2, gs / 2, gs, ha='center', fontsize=8)
-    #     plt.text(b3, t / 2, t, ha='center', fontsize=8)
-    #
-    # plt.xlabel('Tasks', fontweight='bold', size=13)
-    # plt.ylabel('Count', fontweight='bold', size=13)
-    # plt.xticks([r + bar_width for r in bar1], list(Metric.keys()))
-    # plt.title('1D Metric Evaluation')
-    # plt.legend()
-    # plt.tight_layout()
-    # writer.add_figure(f'{mode}_metric/count', fig, epoch)
-    # plt.close(fig)
-
-    add_bar_plot_to_tb(
-        vals_list=[pred_success, gt_success, total], bars=[bar1, bar2, bar3],
-        bar_labels=['pred success', 'gt success', 'total'], colors=['peachpuff', 'lavender', 'skyblue'],
-        bar_width=bar_width, figsize=(3 * n_task, fig_height), text_fontsize=8, ylim=[],
-        axis_labels=['Tasks', 'Count'], title='1D Metric Evaluation', tag=f'{mode}_metric/count',
-        epoch=epoch, writer=writer, use_float_text=False, xticks=list(EpochMetric.keys()), xticks_bar_width_mult=1
-    )
+        add_bar_plot_to_tb(
+            vals_list=[pred_success, gt_success, total], bars=[bar1, bar2, bar3],
+            bar_labels=['pred success', 'gt success', 'total'], colors=['peachpuff', 'lavender', 'skyblue'],
+            bar_width=bar_width, figsize=(3 * n_task, fig_height), text_fontsize=8, ylim=[],
+            axis_labels=['Tasks', 'Count'], title='1D Metric Evaluation', tag=f'{mode}_metric/count',
+            epoch=epoch, writer=writer, use_float_text=False, xticks=list(EpochMetric.keys()), xticks_bar_width_mult=1
+        )
 
     # log task conditioning plots
-    if not train and args.eval_tasks:
+    if not train and args.eval_tasks and args.eval_metric:
         # visualize metric evaluation success rate by bar plot
         bar_width = 0.7
-        # fig = plt.figure(figsize=(2 * n_task, fig_height))
         epoch_success_rate = [safe_div(v['pred_success'], v['total']) for v in TaskMetric.values()]
         total_sum = sum([v['total'] for v in TaskMetric.values()])
         pred_success_sum = sum([v['pred_success'] for v in TaskMetric.values()])
         epoch_success_rate.append(safe_div(pred_success_sum, total_sum))
         xticks = list(TaskMetric.keys())
         xticks.append('total')
-        # plt.bar(xticks, epoch_success_rate, width=bar_width, color='skyblue')
-        # for i, r in enumerate(epoch_success_rate):
-        #     plt.text(i, r / 2, f'{r:.2f}', ha='center', fontsize=15)
-        # plt.xlabel('Tasks', fontweight='bold', size=13)
-        # plt.ylabel('Success rate', fontweight='bold', size=13)
-        # plt.ylim([0, 1])
-        # plt.title('1D Metric Evaluation')
-        # plt.tight_layout()
-        # writer.add_figure(f'{mode}_eval_tasks_metric/task_conditioning_success_rate', fig, epoch)
-        # plt.close(fig)
 
         add_bar_plot_to_tb(
             vals_list=[epoch_success_rate], bars=[xticks], bar_labels=[''], colors=['skyblue'],
@@ -599,26 +519,10 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
 
         # visualize metric evaluation count by bar plot
         bar_width = 0.35
-        # fig = plt.figure(figsize=(3 * n_task, fig_height))
-
         success = [v['pred_success'] for v in TaskMetric.values()]
         total = [v['total'] for v in TaskMetric.values()]
         bar1 = np.arange(len(TaskMetric))
         bar2 = [x + bar_width for x in bar1]
-
-        # plt.bar(bar1, success, color='peachpuff', width=bar_width, label='success')
-        # plt.bar(bar2, total, color='lavender', width=bar_width, label='total')
-        # for b1, s, b2, t in zip(bar1, success, bar2, total):
-        #     plt.text(b1, s / 2, s, ha='center', fontsize=8)
-        #     plt.text(b2, t / 2, t, ha='center', fontsize=8)
-        #
-        # plt.xlabel('Tasks', fontweight='bold', size=13)
-        # plt.ylabel('Count', fontweight='bold', size=13)
-        # plt.xticks([r + bar_width / 2 for r in bar1], list(TaskMetric.keys()))
-        # plt.legend()
-        # plt.tight_layout()
-        # writer.add_figure(f'{mode}_eval_tasks_metric/task_conditioning_count', fig, epoch)
-        # plt.close(fig)
 
         add_bar_plot_to_tb(
             vals_list=[success, total], bars=[bar1, bar2], bar_labels=['success', 'total'],
@@ -629,93 +533,57 @@ def log_epoch_stats(stats, writer, args, global_step, epoch, train=True):
         )
 
     # log contact plots
-    gt_n_pos, gt_n_neg = ContactStats['pos']['gt'], ContactStats['neg']['gt']
-    gt_n_total = gt_n_pos + gt_n_neg
-    pred_n_pos, pred_n_neg = ContactStats['pos']['pred'], ContactStats['neg']['pred']
-    cur_n_pos, cur_n_neg = ContactStats['pos']['bl_cur'], ContactStats['neg']['bl_cur']
-    mean_n_pos, mean_n_neg = ContactStats['pos']['bl_mean'], ContactStats['neg']['bl_mean']
+    if args.pred_contact:
+        gt_n_pos, gt_n_neg = ContactStats['pos']['gt'], ContactStats['neg']['gt']
+        gt_n_total = gt_n_pos + gt_n_neg
+        pred_n_pos, pred_n_neg = ContactStats['pos']['pred'], ContactStats['neg']['pred']
+        cur_n_pos, cur_n_neg = ContactStats['pos']['bl_cur'], ContactStats['neg']['bl_cur']
+        mean_n_pos, mean_n_neg = ContactStats['pos']['bl_mean'], ContactStats['neg']['bl_mean']
 
-    # visualize contact success rate by bar plot
-    bar_width = 0.25
-    # fig = plt.figure(figsize=(4 * 3, fig_height))
+        # visualize contact success rate by bar plot
+        bar_width = 0.25
+        pred_success_rate = [
+            safe_div(pred_n_pos, gt_n_pos), safe_div(pred_n_neg, gt_n_neg),
+            safe_div((pred_n_pos + pred_n_neg), gt_n_total)
+        ]
+        cur_success_rate = [
+            safe_div(cur_n_pos, gt_n_pos), safe_div(cur_n_neg, gt_n_neg),
+            safe_div((cur_n_pos + cur_n_neg), gt_n_total)
+        ]
+        mean_success_rate = [
+            safe_div(mean_n_pos, gt_n_pos), safe_div(mean_n_neg, gt_n_neg),
+            safe_div((mean_n_pos + mean_n_neg), gt_n_total)
+        ]
+        bar1 = np.arange(3)
+        bar2 = [x + bar_width for x in bar1]
+        bar3 = [x + bar_width for x in bar2]
 
-    pred_success_rate = [
-        safe_div(pred_n_pos, gt_n_pos), safe_div(pred_n_neg, gt_n_neg), safe_div((pred_n_pos + pred_n_neg), gt_n_total)
-    ]
-    cur_success_rate = [
-        safe_div(cur_n_pos, gt_n_pos), safe_div(cur_n_neg, gt_n_neg), safe_div((cur_n_pos + cur_n_neg), gt_n_total)
-    ]
-    mean_success_rate = [
-        safe_div(mean_n_pos, gt_n_pos), safe_div(mean_n_neg, gt_n_neg), safe_div((mean_n_pos + mean_n_neg), gt_n_total)
-    ]
-    bar1 = np.arange(3)
-    bar2 = [x + bar_width for x in bar1]
-    bar3 = [x + bar_width for x in bar2]
+        add_bar_plot_to_tb(
+            vals_list=[pred_success_rate, cur_success_rate, mean_success_rate], bars=[bar1, bar2, bar3],
+            bar_labels=['pred', 'bl_cur', 'bl_mean'], colors=['peachpuff', 'lavender', 'skyblue'],
+            bar_width=bar_width, figsize=(2 * n_task, fig_height), text_fontsize=8, axis_labels=('', 'Success rate'),
+            ylim=[0, 1], title='Contact', tag=f'{mode}_contact/success_rate', epoch=epoch, writer=writer,
+            xticks=['pos', 'neg', 'combined'], xticks_bar_width_mult=1, use_plt_xticks=True, add_legend=True
+        )
 
-    # plt.bar(bar1, pred_success_rate, color='peachpuff', width=bar_width, label='pred')
-    # plt.bar(bar2, cur_success_rate, color='lavender', width=bar_width, label='bl_cur')
-    # plt.bar(bar3, mean_success_rate, color='skyblue', width=bar_width, label='bl_mean')
-    # for b1, ps, b2, cs, b3, ms in zip(bar1, pred_success_rate, bar2, cur_success_rate, bar3, mean_success_rate):
-    #     plt.text(b1, ps / 2, f'{ps:.2f}', ha='center', fontsize=8)
-    #     plt.text(b2, cs / 2, f'{cs:.2f}', ha='center', fontsize=8)
-    #     plt.text(b3, ms / 2, f'{ms:.2f}', ha='center', fontsize=8)
-    #
-    # plt.xticks([r + bar_width for r in bar1], ['pos', 'neg', 'combined'])
-    # plt.ylabel('Success rate', fontweight='bold', size=13)
-    # plt.ylim([0, 1])
-    # plt.title('Contact')
-    # plt.legend()
-    # plt.tight_layout()
-    # writer.add_figure(f'{mode}_contact/success_rate', fig, epoch)
-    # plt.close(fig)
+        # visualize contact success count by bar plot
+        bar_width = 0.2
+        pred_success = [pred_n_pos, pred_n_neg, pred_n_pos + pred_n_neg]
+        cur_success = [cur_n_pos, cur_n_neg, cur_n_pos + cur_n_neg]
+        mean_success = [mean_n_pos, mean_n_neg, mean_n_pos + mean_n_neg]
+        total = [gt_n_pos, gt_n_neg, gt_n_total]
+        bar1 = np.arange(3)
+        bar2 = [x + bar_width for x in bar1]
+        bar3 = [x + bar_width for x in bar2]
+        bar4 = [x + bar_width for x in bar3]
 
-    add_bar_plot_to_tb(
-        vals_list=[pred_success_rate, cur_success_rate, mean_success_rate], bars=[bar1, bar2, bar3],
-        bar_labels=['pred', 'bl_cur', 'bl_mean'], colors=['peachpuff', 'lavender', 'skyblue'],
-        bar_width=bar_width, figsize=(2 * n_task, fig_height), text_fontsize=8, axis_labels=('', 'Success rate'),
-        ylim=[0, 1], title='Contact', tag=f'{mode}_contact/success_rate', epoch=epoch, writer=writer,
-        xticks=['pos', 'neg', 'combined'], xticks_bar_width_mult=1, use_plt_xticks=True, add_legend=True
-    )
-
-    # visualize contact success count by bar plot
-    bar_width = 0.2
-    # fig = plt.figure(figsize=(5 * 3, fig_height))
-
-    pred_success = [pred_n_pos, pred_n_neg, pred_n_pos + pred_n_neg]
-    cur_success = [cur_n_pos, cur_n_neg, cur_n_pos + cur_n_neg]
-    mean_success = [mean_n_pos, mean_n_neg, mean_n_pos + mean_n_neg]
-    total = [gt_n_pos, gt_n_neg, gt_n_total]
-    bar1 = np.arange(3)
-    bar2 = [x + bar_width for x in bar1]
-    bar3 = [x + bar_width for x in bar2]
-    bar4 = [x + bar_width for x in bar3]
-
-    # plt.bar(bar1, pred_success, color='peachpuff', width=bar_width, label='pred')
-    # plt.bar(bar2, cur_success, color='lavender', width=bar_width, label='bl_cur')
-    # plt.bar(bar3, mean_success, color='skyblue', width=bar_width, label='bl_mean')
-    # plt.bar(bar4, total, color='wheat', width=bar_width, label='total')
-    #
-    # for b1, ps, b2, cs, b3, ms, b4, t in zip(bar1, pred_success, bar2, cur_success, bar3, mean_success, bar4, total):
-    #     plt.text(b1, ps / 2, ps, ha='center', fontsize=8)
-    #     plt.text(b2, cs / 2, cs, ha='center', fontsize=8)
-    #     plt.text(b3, ms / 2, ms, ha='center', fontsize=8)
-    #     plt.text(b4, t / 2, t, ha='center', fontsize=8)
-    #
-    # plt.xticks([r + bar_width * 1.5 for r in bar1], ['pos', 'neg', 'combined'])
-    # plt.ylabel('Count', fontweight='bold', size=13)
-    # plt.title('Contact')
-    # plt.legend()
-    # plt.tight_layout()
-    # writer.add_figure(f'{mode}_contact/count', fig, epoch)
-    # plt.close(fig)
-
-    add_bar_plot_to_tb(
-        vals_list=[pred_success, cur_success, mean_success, total], bars=[bar1, bar2, bar3, bar4],
-        bar_labels=['pred', 'bl_cur', 'bl_mean', 'total'], colors=['peachpuff', 'lavender', 'skyblue', 'wheat'],
-        bar_width=bar_width, figsize=(5 * 3, fig_height), text_fontsize=8, ylim=[], axis_labels=['', 'Count'],
-        title='Contact', tag=f'{mode}_contact/count', epoch=epoch, writer=writer, use_float_text=False,
-        xticks=['pos', 'neg', 'combined'], xticks_bar_width_mult=1.5
-    )
+        add_bar_plot_to_tb(
+            vals_list=[pred_success, cur_success, mean_success, total], bars=[bar1, bar2, bar3, bar4],
+            bar_labels=['pred', 'bl_cur', 'bl_mean', 'total'], colors=['peachpuff', 'lavender', 'skyblue', 'wheat'],
+            bar_width=bar_width, figsize=(5 * 3, fig_height), text_fontsize=8, ylim=[], axis_labels=['', 'Count'],
+            title='Contact', tag=f'{mode}_contact/count', epoch=epoch, writer=writer, use_float_text=False,
+            xticks=['pos', 'neg', 'combined'], xticks_bar_width_mult=1.5
+        )
 
 
 class AverageMeter(object):
@@ -734,8 +602,10 @@ class AverageMeter(object):
 
 
 class EpochLossMonitor(object):
-    def __init__(self):
+    def __init__(self, monitor_contact=False):
+        self.monitor_contact = monitor_contact
         self.total_loss = AverageMeter()
+        self.total_unweighted_loss = AverageMeter()
         self.xy_loss = AverageMeter()
         self.depth_loss = AverageMeter()
         self.ori_loss = AverageMeter()
@@ -744,11 +614,13 @@ class EpochLossMonitor(object):
 
     def update(self, loss_stats, n=1):
         self.total_loss.update(loss_stats.total_loss, n)
+        self.total_unweighted_loss.update(loss_stats.total_unweighted_loss, n)
         self.xy_loss.update(loss_stats.xy_loss, n)
         self.depth_loss.update(loss_stats.depth_loss, n)
         self.ori_loss.update(loss_stats.ori_loss, n)
-        self.contact_loss.update(loss_stats.contact_loss, n)
-        self.contact_acc.update(loss_stats.contact_acc, n)
+        if self.monitor_contact:
+            self.contact_loss.update(loss_stats.contact_loss, n)
+            self.contact_acc.update(loss_stats.contact_acc, n)
 
 
 if __name__ == '__main__':

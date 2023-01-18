@@ -39,6 +39,7 @@ def load_img_from_hand_info(hand_info, robot_demos, run_on_cv_server):
         img_path = '/' + osp.join(*list(map(lambda x: x.replace('frames', 'robot_frames'), img_path.split('/'))))
     return cv2.imread(img_path)
 
+
 def render_bbox_and_hand_pose(
         visualizer, img_original_bgr, hand_bbox_list, mesh_list, use_visualizer
 ):
@@ -48,6 +49,7 @@ def render_bbox_and_hand_pose(
     res_img = visualizer.render_pred_verts(res_img, mesh_list) if use_visualizer else np.zeros_like(res_img)
     return res_img
 
+
 def extract_hand_bbox_and_mesh_list(hand_info, hand):
     from ss_utils.filter_utils import extract_pred_mesh_list
     other_hand = 'left_hand' if hand == 'right_hand' else 'right_hand'
@@ -56,6 +58,7 @@ def extract_hand_bbox_and_mesh_list(hand_info, hand):
     hand_info['pred_output_list'][0][other_hand] = None
     mesh_list = extract_pred_mesh_list(hand_info)
     return hand_bbox_list, mesh_list
+
 
 def generate_single_visualization(
         current_hand_pose_path,
@@ -84,7 +87,6 @@ def generate_single_visualization(
         pre_interaction=False,
         object_label=None
 ):
-
     from mocap_utils.coordconv import convert_smpl_to_bbox, convert_bbox_to_oriIm
 
     if current_hand_info is None:
@@ -167,7 +169,6 @@ def generate_single_visualization(
             pred_hand_bbox_list, pred_mesh_list, use_visualizer
         )
         vis_img_bgr = np.vstack([current_rendered_img, pred_rendered_img]).astype(np.uint8)
-
 
     white_y = 50
     next_line = 40
@@ -333,7 +334,7 @@ def generate_pred_hand_info(
         pred_hand_bbox_list, pred_mesh_list, use_visualizer
     )
 
-    return(
+    return (
         pred_wrist_x, pred_wrist_y, pred_depth, pred_depth_clipped, pred_ori, pred_rendered_img,
         vis_wrist_x, vis_wrist_y,
     )
@@ -348,7 +349,7 @@ def generate_transferable_visualization(
         pred_delta_y,
         pred_delta_depth,
         pred_delta_ori,  # delta wrist joint rotation, needs to be on Cuda
-        pred_contact,
+        pred_contact_binary,  # 1 or 0
         depth_norm_params,
         ori_norm_params,
         task_name,
@@ -365,6 +366,7 @@ def generate_transferable_visualization(
         passed_metric=False,
         current_depth=None,
         future_depth=None,
+        log_contact=False,
         vis_groundtruth=True
 ):
     # vis for current frame
@@ -492,7 +494,7 @@ def generate_transferable_visualization(
         ).astype(np.uint8)
 
     # initialize vis header
-    white_top_height = 500
+    white_top_height = 450
     white_left_width = 110
     next_line = 40
     desc_left_align = 20
@@ -503,6 +505,8 @@ def generate_transferable_visualization(
     if has_future_label:
         white_top_height += 50
     if log_metric:
+        white_top_height += 50
+    if log_contact:
         white_top_height += 50
     white_top = np.zeros((white_top_height, vis_img_bgr.shape[1], 3), np.uint8)
     white_top[:] = (255, 255, 255)
@@ -569,12 +573,13 @@ def generate_transferable_visualization(
         next_line += 50
 
     # add contact string to vis header
-    contact_str = f'Contact: cur {current_contact}'
-    if has_future_label:
-        contact_str += f', next {next_contact}'
-    contact_str += f', pred {int(pred_contact)}'
-    cv2.putText(vis_img_bgr, contact_str, (header_left_align, next_line), font, text_size, color, thickness, 0)
-    next_line += 50
+    if log_contact:
+        contact_str = f'Contact: cur {current_contact}'
+        if has_future_label:
+            contact_str += f', next {next_contact}'
+        contact_str += f', pred {int(pred_contact_binary)}'
+        cv2.putText(vis_img_bgr, contact_str, (header_left_align, next_line), font, text_size, color, thickness, 0)
+        next_line += 50
 
     # add metric string to vis header
     if log_metric:
@@ -599,7 +604,7 @@ def generate_transferable_visualization(
 
 
 if __name__ == '__main__':
-    test_vis= False
+    test_vis = False
     test_transferable_vis = True
     test_robot_vis = False
 
@@ -635,7 +640,7 @@ if __name__ == '__main__':
         current_hand_pose_path = '/home/junyao/Datasets/something_something_processed/push_left/valid/mocap_output' \
                                  '/220825/mocap/frame24_prediction_result.pkl'
         future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/push_left/valid/mocap_output' \
-                                 '/220825/mocap/frame34_prediction_result.pkl'
+                                '/220825/mocap/frame34_prediction_result.pkl'
         hand = 'right_hand'
 
         print('Preprocessing hand data from pkl.')
@@ -700,6 +705,7 @@ if __name__ == '__main__':
 
         if log_tb:
             from torch.utils.tensorboard import SummaryWriter
+
             writer = SummaryWriter(log_dir='tb_vis_test')
             writer.add_scalar('loss', 3, 1)
             writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')
@@ -748,7 +754,7 @@ if __name__ == '__main__':
         current_hand_pose_path = '/home/junyao/Datasets/something_something_processed/push_right/valid/mocap_output' \
                                  '/209007/mocap/frame40_prediction_result.pkl'
         future_hand_pose_path = '/home/junyao/Datasets/something_something_processed/push_right/valid/mocap_output' \
-                                 '/209007/mocap/frame50_prediction_result.pkl'
+                                '/209007/mocap/frame50_prediction_result.pkl'
         hand = 'left_hand'
 
         print('Preprocessing hand data from pkl.')
@@ -800,7 +806,7 @@ if __name__ == '__main__':
             pred_delta_ori=delta_ori,
             depth_norm_params=depth_norm_params,
             ori_norm_params=ori_norm_params,
-            pred_contact=contact,
+            pred_contact_binary=contact,
             task_name=task_name,
             visualizer=visualizer,
             use_visualizer=use_visualizer,
@@ -820,6 +826,7 @@ if __name__ == '__main__':
 
         if log_tb:
             from torch.utils.tensorboard import SummaryWriter
+
             writer = SummaryWriter(log_dir='tb_vis_test')
             writer.add_scalar('loss', 3, 1)
             writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')
@@ -918,6 +925,7 @@ if __name__ == '__main__':
 
         if log_tb:
             from torch.utils.tensorboard import SummaryWriter
+
             writer = SummaryWriter(log_dir='tb_vis_test')
             writer.add_scalar('loss', 3, 1)
             writer.add_image(f'vis_images', vis_img, 1, dataformats='HWC')

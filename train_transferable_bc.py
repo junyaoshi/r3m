@@ -1,5 +1,7 @@
 import argparse
 import time
+
+import torch
 from tqdm import tqdm
 from datetime import timedelta
 
@@ -28,6 +30,13 @@ def parse_args():
                             'residual'  # residual network
                         ],
                         help="network architecture to use")
+    parser.add_argument('--pred_residual', type=str2bool, default=True,
+                        help='if true, use residual values (target - current); else use original target values')
+    parser.add_argument('--pred_contact', type=str2bool, default=False,
+                        help='if true, predicts contact flag at each timestep; '
+                             'else, contact is not predicted and lambda4 is set to 0')
+    parser.add_argument('--pred_prob', type=str2bool, default=False,
+                        help='if true, model output is probability distribution instead of scalar')
 
     # data
     parser.add_argument('--time_interval', type=int, default=15,
@@ -37,8 +46,8 @@ def parse_args():
     parser.add_argument("--depth_descriptor", type=str, default="scaling_factor",
                         choices=['scaling_factor', 'normalized_bbox_size'],
                         help="descriptor for estimating hand depth")
-    parser.add_argument('--no_shuffle', action='store_true',
-                        help='if true, dataloader is not shuffled')
+    parser.add_argument('--shuffle_data', type=str2bool, default=True,
+                        help='if true, dataloader is shuffled')
     parser.add_argument("--stage", type=str, default="all",
                         choices=[
                             'all',  # use all data
@@ -60,12 +69,6 @@ def parse_args():
                         help='weight for contact loss')
     parser.add_argument('--bce_weight_mult', type=float, default=1.0,
                         help='multiplier for BCE loss pos_weight parameter')
-    parser.add_argument('--pred_mode', type=str, default="residual",
-                        choices=[
-                            'original', # use original target values
-                            'residual'  # use residual values (target - current)
-                        ],
-                        help='prediction mode for the model')
     parser.add_argument('--eval_freq', type=int, default=1,
                         help='perform evaluation after this many epochs')
     parser.add_argument('--log_scalar_freq', type=int, default=100,
@@ -76,10 +79,10 @@ def parse_args():
                         help='visualize rendered images after this many steps')
     parser.add_argument('--epochs', type=int, default=200,
                         help='number of training epochs')
-    parser.add_argument('--eval_on_train', action='store_true', default=False,
+    parser.add_argument('--eval_on_train', type=str2bool, default=False,
                         help='Evaluate model on training set instead of validation set (for debugging)')
-    parser.add_argument('--eval_tasks', action='store_true',
-                        help='if true, perform task-conditioned evaluatuation')
+    parser.add_argument('--eval_tasks', type=str2bool, default=True,
+                        help='if true, perform task-conditioned evaluation')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='batch size per GPU')
     parser.add_argument('--vis_sample_size', type=int, default=5,
@@ -89,19 +92,21 @@ def parse_args():
                              'set to 0 to disable task-conditioned visualization')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='number of workers for dataloaders')
-    parser.add_argument('--cont_training', action='store_true', default=False,
+    parser.add_argument('--cont_training', type=str2bool, default=False,
                         help='This flag enables training from an existing checkpoint.')
-    parser.add_argument('--run_on_cv_server', action='store_true',
-                        help='if true, run tasks on cv-server; else, run all tasks on cluster')
-    parser.add_argument('--use_visualizer', action='store_true',
-                        help='if true, use opengl visualizer to render results and show on tensorboard')
+    parser.add_argument('--run_on_cv_server', type=str2bool, default=False,
+                        help='set to true if running on cv-server; false if running on cluster')
+    parser.add_argument('--use_visualizer', type=str2bool, default=True,
+                        help='if true, use opengl visualizer to render results and show on tensorboard. '
+                             'Note that this should be used in tandem with xvfb-run, and cannot be used along with '
+                             'break points in debug mode')
 
     # debugging and sanity check
-    parser.add_argument('--sanity_check', action='store_true', default=False,
+    parser.add_argument('--sanity_check', type=str2bool, default=False,
                         help='perform sanity check (try to only fit a few examples)')
     parser.add_argument('--sanity_check_size', type=int, default=32,
                         help='number of data for sanity check')
-    parser.add_argument('--debug', action='store_true',
+    parser.add_argument('--debug', type=str2bool, default=False,
                         help='if true, enter debug mode, load 50 videos and no parallel workers')
 
     # paths
@@ -118,15 +123,12 @@ def parse_args():
     parser.add_argument('--r3m_path', type=str,
                         default='/home/junyao/LfHV/r3m',
                         help='location of R3M')
-    parser.add_argument('--depth_norm_params_path', type=str,
-                        default='/home/junyao/LfHV/frankmocap/ss_utils/depth_normalization_params.pkl',
-                        help='location of depth normalization params')
-    parser.add_argument('--ori_norm_params_path', type=str,
-                        default='/home/junyao/LfHV/frankmocap/ss_utils/ori_normalization_params.pkl',
-                        help='location of orientation normalization params')
+    parser.add_argument('--data_params_path', type=str,
+                        default='/home/junyao/LfHV/frankmocap/ss_utils/data_params.pkl',
+                        help='location of data params (min, max, mean, std of each feature)')
     parser.add_argument('--contact_count_dir', type=str,
                         default='/home/junyao/LfHV/frankmocap/ss_utils',
-                        help='location of orientation normalization params')
+                        help='location of contact pos/neg counts')
 
     args = parser.parse_args()
     return args
@@ -135,16 +137,19 @@ def parse_args():
 def main(args):
     program_start = time.time()
     if args.sanity_check:
-        args.no_shuffle = True
+        args.shuffle_data = False
         args.eval_on_train = True
         args.log_scalar_freq = 1
         torch.manual_seed(5157)
         np.random.seed(5157)
         assert args.batch_size <= args.sanity_check_size
-    args.pred_residual = args.pred_mode == 'residual'
+    if not args.pred_contact:
+        args.lambda4 = 0
+    args.eval_metric = args.stage != 'pre'
+    assert not args.pred_prob, 'Probabilistic output not implemented yet!'
     assert args.vis_sample_size <= args.batch_size
     args.save = join(args.root, args.save)
-    assert (args.lambda1 > 0) and (args.lambda2 > 0) and (args.lambda3 > 0) and (args.lambda4 > 0)
+    assert (args.lambda1 > 0) and (args.lambda2 > 0) and (args.lambda3 > 0) and (args.lambda4 >= 0)
     task_names = ALL_TASKS
     args.task_names = task_names
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -166,7 +171,7 @@ def main(args):
 
     # compute dimensions
     args.r3m_dim, args.task_dim = 2048, len(task_names)
-    args.xy_dim, args.depth_dim, args.ori_dim, args.contact_dim = 2, 1, 3, 1
+    args.xy_dim, args.depth_dim, args.ori_dim, args.contact_dim = 2, 1, 3, 1 if args.pred_contact else 0
     args.input_dim = sum([args.r3m_dim, args.task_dim, args.xy_dim, args.depth_dim, args.ori_dim, args.contact_dim])
     args.output_dim = sum([args.xy_dim, args.depth_dim, args.ori_dim, args.contact_dim])
 
@@ -186,18 +191,25 @@ def main(args):
     print(f'Loaded transferable BC model. Blocks: {args.n_blocks}, Network: {args.net_type}.')
     print(f'param size = {count_parameters_in_M(model)}M')
 
-    # load pkl
-    args.depth_norm_params = load_pkl(args.depth_norm_params_path)[args.depth_descriptor]
-    args.ori_norm_params = load_pkl(args.ori_norm_params_path)
-    args.contact_count_path = join(args.contact_count_dir, f'contact_count_t={args.time_interval}.pkl')
-    args.contact_count = load_pkl(args.contact_count_path)
-    args.bce_pos_weight = args.bce_weight_mult * args.contact_count['n_neg'] / args.contact_count['n_pos']
-    print(f'Positive Weight for BCE: {args.bce_pos_weight:.4f}')
+    # load and process data params
+    args.data_params = load_pkl(args.data_params_path)
+    args.depth_norm_params = args.data_params[f'depth_{args.depth_descriptor}']
+    args.ori_norm_params = args.data_params['ori']
+
+    # process contact args
+    print(f'Predicting contact: {args.pred_contact}')
+    if args.pred_contact:
+        args.contact_count_path = join(args.contact_count_dir, f'contact_count_t={args.time_interval}.pkl')
+        args.contact_count = load_pkl(args.contact_count_path)
+        args.bce_pos_weight = args.bce_weight_mult * args.contact_count['n_neg'] / args.contact_count['n_pos']
+        print(f'Positive Weight for BCE: {args.bce_pos_weight:.4f}')
+        bce_loss_func = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(args.bce_pos_weight).to(device))
+    else:
+        bce_loss_func = None  # placeholder when not used
 
     # optimizer and loss
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     l2_loss_func = nn.MSELoss()
-    bce_loss_func = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(args.bce_pos_weight).to(device))
 
     # create data loaders
     print('Creating data loaders...')
@@ -206,8 +218,8 @@ def main(args):
         data_home_dirs=args.data_home_dirs, task_names=task_names, split='train',
         iou_thresh=args.iou_thresh, time_interval=args.time_interval, stage=args.stage,
         depth_descriptor=args.depth_descriptor, depth_norm_params=args.depth_norm_params,
-        ori_norm_params=args.ori_norm_params, debug=args.debug, run_on_cv_server=args.run_on_cv_server,
-        num_cpus=args.num_workers, has_task_labels=True, has_future_labels=True
+        ori_norm_params=args.ori_norm_params, debug=args.debug, num_cpus=args.num_workers,
+        has_task_labels=True, has_future_labels=True
     )
     data_end = time.time()
     print(f'Loaded train data. Time: {data_end - data_start:.5f} seconds')
@@ -225,8 +237,8 @@ def main(args):
             data_home_dirs=args.data_home_dirs, task_names=task_names, split='valid',
             iou_thresh=args.iou_thresh, time_interval=args.time_interval, stage=args.stage,
             depth_descriptor=args.depth_descriptor, depth_norm_params=args.depth_norm_params,
-            ori_norm_params=args.ori_norm_params, debug=args.debug, run_on_cv_server=args.run_on_cv_server,
-            num_cpus=args.num_workers, has_task_labels=True, has_future_labels=True
+            ori_norm_params=args.ori_norm_params, debug=args.debug, num_cpus=args.num_workers,
+            has_task_labels=True, has_future_labels=True
         )
         data_end = time.time()
         print(f'Loaded valid data. Time: {data_end - data_start:.5f} seconds')
@@ -236,11 +248,11 @@ def main(args):
     if args.debug or args.sanity_check:
         dataloader_num_workers = 0
     train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.batch_size, shuffle=not args.no_shuffle,
+        train_data, batch_size=args.batch_size, shuffle=args.shuffle_data,
         num_workers=dataloader_num_workers, drop_last=True
     )
     valid_queue = torch.utils.data.DataLoader(
-        valid_data, batch_size=args.batch_size, shuffle=not args.no_shuffle,
+        valid_data, batch_size=args.batch_size, shuffle=args.shuffle_data,
         num_workers=dataloader_num_workers, drop_last=True
     )
     print('Creating data loaders: done')
@@ -268,6 +280,18 @@ def main(args):
         epoch_start = time.time()
         print(f'\nepoch {epoch}')
 
+        # initial evaluation
+        if global_step == 0:
+            print('Performing initial evaluation')
+            ValidStats = test(
+                valid_queue, model, device,
+                l2_loss_func, bce_loss_func,
+                global_step, writer,
+                visualizer, hand_mocap,
+                task_names, args,
+            )
+            log_epoch_stats(ValidStats, writer, args, global_step, 0, train=False)
+
         # Training.
         TrainStats = train(
             train_queue, model, optimizer, device,
@@ -280,7 +304,7 @@ def main(args):
         log_epoch_stats(TrainStats, writer, args, global_step, epoch, train=True)
 
         # Evaluation.
-        if epoch % args.eval_freq == 0 or epoch == (args.epochs - 1):
+        if epoch == init_epoch or epoch % args.eval_freq == 0 or epoch == (args.epochs - 1):
             ValidStats = test(
                 valid_queue, model, device,
                 l2_loss_func, bce_loss_func,
@@ -315,7 +339,6 @@ def main(args):
         visualizer, hand_mocap,
         task_names, args,
     )
-
     log_epoch_stats(valid_stats, writer, args, global_step, args.epochs, train=False)
 
     program_end = time.time()
@@ -332,9 +355,9 @@ def train(
 ):
     model.train()
 
-    TrainMonitor = EpochLossMonitor()
-    BLcurMonitor = EpochLossMonitor()  # using current hand info for prediction as baseline
-    BLmeanMonitor = EpochLossMonitor()  # using mean of batch for prediction as baseline
+    TrainMonitor = EpochLossMonitor(monitor_contact=args.pred_contact)
+    BLcurMonitor = EpochLossMonitor(monitor_contact=args.pred_contact)  # use current info as baseline
+    BLmeanMonitor = EpochLossMonitor(monitor_contact=args.pred_contact)  # use batch mean as baseline
     EpochMetric = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
     ContactStats = {c: {'gt': 0, 'pred': 0, 'bl_cur': 0, 'bl_mean': 0} for c in ['pos', 'neg']}
 
@@ -346,20 +369,18 @@ def train(
 
         # process batch data
         input = torch.cat((
-            data.hand_r3m, data.task,
-            data.current_x.unsqueeze(1), data.current_y.unsqueeze(1), data.current_depth.unsqueeze(1),
-            data.current_ori, data.current_contact.unsqueeze(1),
+            data.hand_r3m, data.task, data.current_x.unsqueeze(1), data.current_y.unsqueeze(1),
+            data.current_depth.unsqueeze(1), data.current_ori,
+            data.current_contact.unsqueeze(1) if args.pred_contact else torch.empty(data.current_contact.size(0), 0)
         ), dim=1).to(device).float()
 
         current_x, current_y = data.current_x.to(device).float(), data.current_y.to(device).float()
         current_xy = torch.cat((current_x.unsqueeze(1), current_y.unsqueeze(1)), dim=1)
         current_depth, current_ori = data.current_depth.to(device).float(), data.current_ori.to(device)
-        current_contact = data.current_contact.to(device).float()
 
         future_x, future_y = data.future_x.to(device).float(), data.future_y.to(device).float()
         future_xy = torch.cat((future_x.unsqueeze(1), future_y.unsqueeze(1)), dim=1)
         future_depth, future_ori = data.future_depth.to(device).float(), data.future_ori.to(device)
-        future_contact = data.future_contact.to(device).float()
 
         # handle residual prediction mode
         target_xy = get_target_val(future_xy, current_xy, args)
@@ -371,32 +392,42 @@ def train(
         output = model(input)
 
         # process network output
-        pred_xy, pred_depth = output[:, 0:2], output[:, 2]
-        pred_ori, pred_contact = output[:, 3:6], output[:, 6]
-        pred_contact_binary = torch.round(torch.sigmoid(pred_contact))  # float -> 0/1
+        pred_xy, pred_depth, pred_ori  = output[:, 0:2], output[:, 2], output[:, 3:6]
         if not args.pred_residual:
             pred_xy = torch.sigmoid(pred_xy)  # force xy to be positive bbox coords
 
-        # process contact and loss
+        # process contact-related steps
+        current_contact, future_contact, pred_contact, pred_contact_binary = None, None, None, None
+        contact_acc, cur_contact_acc, mean_contact_acc, contact_loss = None, None, None, 0.
+        if args.pred_contact:
+            current_contact = data.current_contact.to(device).float()
+            future_contact = data.future_contact.to(device).float()
+            pred_contact = output[:, 6]
+            pred_contact_binary = torch.round(torch.sigmoid(pred_contact))  # float -> 0/1
+            mean_contact = torch.tensor(
+                args.data_params['contact']['mean']
+            ).to(device).float().repeat(pred_contact.size(0))
+            contact_loss = bce_loss_func(pred_contact, future_contact)
+            with torch.no_grad():
+                contact_accs, ContactStats = process_contact_stats(
+                    current_contact, future_contact, pred_contact, mean_contact, ContactStats
+                )
+                contact_acc, cur_contact_acc, mean_contact_acc = contact_accs
+
+        # process loss and baseline
         xy_loss = l2_loss_func(pred_xy, target_xy)
         depth_loss = l2_loss_func(pred_depth, target_depth)
         ori_loss = l2_loss_func(pred_ori, target_ori)
-        contact_loss = bce_loss_func(pred_contact, future_contact)
         loss = args.lambda1 * xy_loss + \
                args.lambda2 * depth_loss + \
                args.lambda3 * ori_loss + \
                args.lambda4 * contact_loss
 
         with torch.no_grad():
-            contact_accs, ContactStats = process_contact_stats(
-                current_contact, future_contact, pred_contact, ContactStats
-            )
-            contact_acc, cur_contact_acc, mean_contact_acc = contact_accs
-
             loss_unweighted = xy_loss + depth_loss + ori_loss + contact_loss
             TrainLosses = LossStats(
-                total_loss=loss_unweighted.data, xy_loss=xy_loss.data, depth_loss=depth_loss.data,
-                ori_loss=ori_loss.data, contact_loss=contact_loss.data, contact_acc=contact_acc.data,
+                total_loss=loss, total_unweighted_loss=loss_unweighted, xy_loss=xy_loss, depth_loss=depth_loss,
+                ori_loss=ori_loss, contact_loss=contact_loss if args.pred_contact else None, contact_acc=contact_acc
             )
             BLcurLosses = process_baseline_loss(
                 current_data=(current_xy, current_depth, current_ori, current_contact),
@@ -411,23 +442,24 @@ def train(
                 loss_funcs=(l2_loss_func, bce_loss_func), args=args, mode='mean'
             )
 
-        # back propogate
+        # back propagate
         loss.backward()
         optimizer.step()
 
         # process metric evaluation
-        metric_stats = evaluate_transferable_metric_batch(
-            task_names=task_names, task=data.task, device=device,
-            current_x=current_x, future_x=future_x, current_y=current_y, future_y=future_y,
-            current_depth=current_depth, future_depth=future_depth, evaluate_gt=True,
-            pred_x=get_sum_val(current_x, pred_xy[:, 0], args),
-            pred_y=get_sum_val(current_y, pred_xy[:, 1], args),
-            pred_depth=get_sum_val(current_depth, pred_depth, args)
-        )
-        for k, v in metric_stats.items():
-            EpochMetric[k]['total'] += v['total']
-            EpochMetric[k]['pred_success'] += v['pred_success']
-            EpochMetric[k]['gt_success'] += v['gt_success']
+        if args.eval_metric:
+            metric_stats = evaluate_transferable_metric_batch(
+                task_names=task_names, task=data.task, device=device,
+                current_x=current_x, future_x=future_x, current_y=current_y, future_y=future_y,
+                current_depth=current_depth, future_depth=future_depth, evaluate_gt=True,
+                pred_x=get_sum_val(current_x, pred_xy[:, 0], args),
+                pred_y=get_sum_val(current_y, pred_xy[:, 1], args),
+                pred_depth=get_sum_val(current_depth, pred_depth, args)
+            )
+            for k, v in metric_stats.items():
+                EpochMetric[k]['total'] += v['total']
+                EpochMetric[k]['pred_success'] += v['pred_success']
+                EpochMetric[k]['gt_success'] += v['gt_success']
 
         TrainMonitor.update(TrainLosses, 1)
         BLcurMonitor.update(BLcurLosses, 1)
@@ -435,9 +467,15 @@ def train(
 
         # log scalars
         if (global_step + 1) % args.log_scalar_freq == 0:
-            write_loss_to_tb(TrainLosses, writer, global_step, tag='train')
-            write_loss_to_tb(BLcurLosses, writer, global_step, tag='train_baseline_current')
-            write_loss_to_tb(BLmeanLosses, writer, global_step, tag='train_baseline_mean')
+            write_loss_to_tb(
+                TrainLosses, writer, global_step, tag='train', log_contact=args.pred_contact
+            )
+            write_loss_to_tb(
+                BLcurLosses, writer, global_step, tag='train_baseline_current', log_contact=args.pred_contact
+            )
+            write_loss_to_tb(
+                BLmeanLosses, writer, global_step, tag='train_baseline_mean', log_contact=args.pred_contact
+            )
 
         # log images
         if (global_step + 1) % args.vis_freq == 0 and not args.sanity_check:
@@ -450,7 +488,7 @@ def train(
                     pred_x=get_sum_val(current_x[i], pred_xy[i, 0], args),
                     pred_y=get_sum_val(current_y[i], pred_xy[i, 1], args),
                     pred_depth=get_sum_val(current_depth[i], pred_depth[i], args)
-                )
+                ).item() if args.eval_metric else False
 
                 vis_img = generate_transferable_visualization(
                     current_hand_pose_path=data.current_info_path[i], future_hand_pose_path=data.future_info_path[i],
@@ -458,11 +496,11 @@ def train(
                     pred_delta_x=get_res_val(pred_xy[i, 0], current_x[i], args).item(),
                     pred_delta_y=get_res_val(pred_xy[i, 1], current_y[i], args).item(),
                     pred_delta_depth=get_res_val(pred_depth[i], current_depth[i], args).item(),
-                    pred_delta_ori=get_res_val(pred_ori[i], current_ori[i], args),
-                    pred_contact=pred_contact_binary[i],
+                    pred_delta_ori=get_res_val(pred_ori[i], current_ori[i], args), log_contact=args.pred_contact,
+                    pred_contact_binary=pred_contact_binary[i] if args.pred_contact else None,
                     depth_norm_params=args.depth_norm_params, ori_norm_params=args.ori_norm_params,
                     task_name=task_name, visualizer=visualizer, use_visualizer=args.use_visualizer,
-                    hand_mocap=hand_mocap, device=device, log_metric=True, passed_metric=passed_metric.item()
+                    hand_mocap=hand_mocap, device=device, log_metric=args.eval_metric, passed_metric=passed_metric
                 )
                 vis_imgs.append(vis_img)
             final_vis_img = np.hstack(vis_imgs)
@@ -470,22 +508,22 @@ def train(
 
             # visualize different task conditioning
             if args.eval_tasks:
+                n_tasks = len(task_names)
                 for i in range(args.task_vis_sample_size):
                     # process task input
                     original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
                     all_task_instances = []
                     for j, task_name in enumerate(task_names):
-                        task_instance = torch.zeros(1, len(task_names))
+                        task_instance = torch.zeros(1, n_tasks)
                         task_instance[0, j] = 1
                         all_task_instances.append(task_instance)
                     all_task_instances = torch.vstack(all_task_instances)
 
                     task_conditioned_input = torch.cat((
-                        data.hand_r3m[i].repeat(len(task_names), 1), all_task_instances,
-                        data.current_x[i].repeat(len(task_names), 1), data.current_y[i].repeat(len(task_names), 1),
-                        data.current_depth[i].repeat(len(task_names), 1),
-                        data.current_ori[i].repeat(len(task_names), 1),
-                        data.current_contact[i].repeat(len(task_names), 1),
+                        data.hand_r3m[i].repeat(n_tasks, 1), all_task_instances,
+                        data.current_x[i].repeat(n_tasks, 1), data.current_y[i].repeat(n_tasks, 1),
+                        data.current_depth[i].repeat(n_tasks, 1), data.current_ori[i].repeat(n_tasks, 1),
+                        data.current_contact[i].repeat(n_tasks, 1) if args.pred_contact else torch.empty(n_tasks, 0)
                     ), dim=1).to(device).float()
 
                     # forward through network and process output
@@ -493,9 +531,11 @@ def train(
                     with torch.no_grad():
                         task_conditioned_output = model(task_conditioned_input)
                         t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
-                        t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
+                        t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], None
                         if not args.pred_residual:
                             t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
+                        if args.pred_contact:
+                            t_pred_contact = task_conditioned_output[:, 6]
 
                     task_vis_imgs = []
                     for j, task_name in enumerate(task_names):
@@ -505,9 +545,10 @@ def train(
                             pred_x=get_sum_val(current_x[i], t_pred_xy[j, 0], args),
                             pred_y=get_sum_val(current_y[i], t_pred_xy[j, 1], args),
                             pred_depth=get_sum_val(current_depth[i], t_pred_depth[j], args)
-                        )
+                        ).item() if args.eval_metric else False
 
-                        pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j]))
+                        t_pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j])) \
+                            if args.pred_contact else None
                         task_vis_img = generate_transferable_visualization(
                             current_hand_pose_path=data.current_info_path[i], future_hand_pose_path=None,
                             run_on_cv_server=args.run_on_cv_server, hand=data.hand[i],
@@ -515,10 +556,11 @@ def train(
                             pred_delta_y=get_res_val(t_pred_xy[j, 1], current_y[i], args).item(),
                             pred_delta_depth=get_res_val(t_pred_depth[j], current_depth[i], args).item(),
                             pred_delta_ori=get_res_val(t_pred_ori[j], current_ori[i], args),
-                            pred_contact=pred_contact_binary,
+                            pred_contact_binary=t_pred_contact_binary, log_contact=args.pred_contact,
                             depth_norm_params=args.depth_norm_params, ori_norm_params=args.ori_norm_params,
                             task_name=task_name, visualizer=visualizer, use_visualizer=args.use_visualizer,
-                            hand_mocap=hand_mocap, device=device, log_metric=True, passed_metric=passed_metric.item(),
+                            hand_mocap=hand_mocap, device=device,
+                            log_metric=args.eval_metric, passed_metric=passed_metric,
                             original_task=task_name == original_task_name, vis_groundtruth=False
                         )
                         task_vis_imgs.append(task_vis_img)
@@ -546,9 +588,9 @@ def test(
 ):
     model.eval()
 
-    ValidMonitor = EpochLossMonitor()
-    BLcurMonitor = EpochLossMonitor()  # using current hand info for prediction as baseline
-    BLmeanMonitor = EpochLossMonitor()  # using mean of batch for prediction as baseline
+    ValidMonitor = EpochLossMonitor(monitor_contact=args.pred_contact)
+    BLcurMonitor = EpochLossMonitor(monitor_contact=args.pred_contact)  # use current info as baseline
+    BLmeanMonitor = EpochLossMonitor(monitor_contact=args.pred_contact)  # use batch mean as baseline
     EpochMetric = {task_name: {'total': 0, 'pred_success': 0, 'gt_success': 0} for task_name in task_names}
     TaskMetric = None
     ContactStats = {c: {'gt': 0, 'pred': 0, 'bl_cur': 0, 'bl_mean': 0} for c in ['pos', 'neg']}
@@ -557,20 +599,18 @@ def test(
     for step, data in tqdm(enumerate(valid_queue), 'Going through valid data...'):
         # process batch data
         input = torch.cat((
-            data.hand_r3m, data.task,
-            data.current_x.unsqueeze(1), data.current_y.unsqueeze(1), data.current_depth.unsqueeze(1),
-            data.current_ori, data.current_contact.unsqueeze(1),
+            data.hand_r3m, data.task, data.current_x.unsqueeze(1), data.current_y.unsqueeze(1),
+            data.current_depth.unsqueeze(1), data.current_ori,
+            data.current_contact.unsqueeze(1) if args.pred_contact else torch.empty(data.current_contact.size(0), 0)
         ), dim=1).to(device).float()
 
         current_x, current_y = data.current_x.to(device).float(), data.current_y.to(device).float()
         current_xy = torch.cat((current_x.unsqueeze(1), current_y.unsqueeze(1)), dim=1)
         current_depth, current_ori = data.current_depth.to(device).float(), data.current_ori.to(device)
-        current_contact = data.current_contact.to(device).float()
 
         future_x, future_y = data.future_x.to(device).float(), data.future_y.to(device).float()
         future_xy = torch.cat((future_x.unsqueeze(1), future_y.unsqueeze(1)), dim=1)
         future_depth, future_ori = data.future_depth.to(device).float(), data.future_ori.to(device)
-        future_contact = data.future_contact.to(device).float()
 
         # handle residual prediction mode
         target_xy = get_target_val(future_xy, current_xy, args)
@@ -581,34 +621,41 @@ def test(
         with torch.no_grad():
             # forward through model and process output
             output = model(input)
-            pred_xy, pred_depth = output[:, 0:2], output[:, 2]
-            pred_ori, pred_contact = output[:, 3:6], output[:, 6]
-            pred_contact_binary = torch.round(torch.sigmoid(pred_contact))  # float -> 0/1
+            pred_xy, pred_depth, pred_ori = output[:, 0:2], output[:, 2], output[:, 3:6]
             if not args.pred_residual:
                 pred_xy = torch.sigmoid(pred_xy)  # force xy to be positive bbox coords
 
-            # process contact and loss
+            # process contact-related steps
+            current_contact, future_contact, pred_contact, pred_contact_binary = None, None, None, None
+            contact_acc, cur_contact_acc, mean_contact_acc, contact_loss = None, None, None, 0.
+            if args.pred_contact:
+                current_contact = data.current_contact.to(device).float()
+                future_contact = data.future_contact.to(device).float()
+                pred_contact = output[:, 6]
+                pred_contact_binary = torch.round(torch.sigmoid(pred_contact))  # float -> 0/1
+                mean_contact = torch.tensor(
+                    args.data_params['contact']['mean']
+                ).to(device).float().repeat(pred_contact.size(0))
+                contact_loss = bce_loss_func(pred_contact, future_contact)
+                contact_accs, ContactStats = process_contact_stats(
+                    current_contact, future_contact, pred_contact, mean_contact, ContactStats
+                )
+                contact_acc, cur_contact_acc, mean_contact_acc = contact_accs
+
+            # process loss and baseline
             xy_loss = l2_loss_func(pred_xy, target_xy)
             depth_loss = l2_loss_func(pred_depth, target_depth)
             ori_loss = l2_loss_func(pred_ori, target_ori)
-            contact_loss = bce_loss_func(pred_contact, future_contact)
             loss = args.lambda1 * xy_loss + \
                    args.lambda2 * depth_loss + \
                    args.lambda3 * ori_loss + \
                    args.lambda4 * contact_loss
 
-            contact_accs, ContactStats = process_contact_stats(
-                current_contact, future_contact, pred_contact, ContactStats
-            )
-            contact_acc, cur_contact_acc, mean_contact_acc = contact_accs
-
             loss_unweighted = xy_loss + depth_loss + ori_loss + contact_loss
             ValidLosses = LossStats(
-                total_loss=loss_unweighted.data, xy_loss=xy_loss.data, depth_loss=depth_loss.data,
-                ori_loss=ori_loss.data, contact_loss=contact_loss.data, contact_acc=contact_acc.data,
+                total_loss=loss, total_unweighted_loss=loss_unweighted, xy_loss=xy_loss, depth_loss=depth_loss,
+                ori_loss=ori_loss, contact_loss=contact_loss if args.pred_contact else None, contact_acc=contact_acc
             )
-
-            # process baseline
             BLcurLosses = process_baseline_loss(
                 current_data=(current_xy, current_depth, current_ori, current_contact),
                 target_data=(target_xy, target_depth, target_ori, future_contact),
@@ -622,7 +669,8 @@ def test(
                 loss_funcs=(l2_loss_func, bce_loss_func), args=args, mode='mean'
             )
 
-            # process metric evaluation
+        # process metric evaluation
+        if args.eval_metric:
             metric_stats = evaluate_transferable_metric_batch(
                 task_names=task_names, task=data.task, device=device,
                 current_x=current_x, future_x=future_x, current_y=current_y, future_y=future_y,
@@ -650,7 +698,7 @@ def test(
             pred_x=get_sum_val(current_x[i], pred_xy[i, 0], args),
             pred_y=get_sum_val(current_y[i], pred_xy[i, 1], args),
             pred_depth=get_sum_val(current_depth[i], pred_depth[i], args)
-        )
+        ).item() if args.eval_metric else False
 
         vis_img = generate_transferable_visualization(
             current_hand_pose_path=data.current_info_path[i], future_hand_pose_path=data.future_info_path[i],
@@ -658,11 +706,11 @@ def test(
             pred_delta_x=get_res_val(pred_xy[i, 0], current_x[i], args).item(),
             pred_delta_y=get_res_val(pred_xy[i, 1], current_y[i], args).item(),
             pred_delta_depth=get_res_val(pred_depth[i], current_depth[i], args).item(),
-            pred_delta_ori=get_res_val(pred_ori[i], current_ori[i], args),
-            pred_contact=pred_contact_binary[i],
+            pred_delta_ori=get_res_val(pred_ori[i], current_ori[i], args), log_contact=args.pred_contact,
+            pred_contact_binary=pred_contact_binary[i] if args.pred_contact else None,
             depth_norm_params=args.depth_norm_params, ori_norm_params=args.ori_norm_params,
             task_name=task_name, visualizer=visualizer, use_visualizer=args.use_visualizer,
-            hand_mocap=hand_mocap, device=device, log_metric=True, passed_metric=passed_metric.item()
+            hand_mocap=hand_mocap, device=device, log_metric=args.eval_metric, passed_metric=passed_metric
         )
         vis_imgs.append(vis_img)
     final_vis_img = np.hstack(vis_imgs)
@@ -670,59 +718,63 @@ def test(
 
     # task-conditioned evaluation
     if args.eval_tasks:
+        n_tasks = len(task_names)
         task_vis_sample_count = 0
         TaskMetric = {task_name: {'total': 0, 'pred_success': 0} for task_name in task_names}
         all_task_instances = []
         for j, task_name in enumerate(task_names):
-            task_instance = torch.zeros(1, len(task_names))
+            task_instance = torch.zeros(1, n_tasks)
             task_instance[0, j] = 1
             all_task_instances.append(task_instance)
         all_task_instances = torch.vstack(all_task_instances)
         for i in range(data.current_x.size(0)):
             original_task_name = task_names[torch.argmax(data.task[i].squeeze())]
             task_conditioned_input = torch.cat((
-                data.hand_r3m[i].repeat(len(task_names), 1), all_task_instances,
-                data.current_x[i].repeat(len(task_names), 1), data.current_y[i].repeat(len(task_names), 1),
-                data.current_depth[i].repeat(len(task_names), 1), data.current_ori[i].repeat(len(task_names), 1),
-                data.current_contact[i].repeat(len(task_names), 1),
+                data.hand_r3m[i].repeat(n_tasks, 1), all_task_instances,
+                data.current_x[i].repeat(n_tasks, 1), data.current_y[i].repeat(n_tasks, 1),
+                data.current_depth[i].repeat(n_tasks, 1), data.current_ori[i].repeat(n_tasks, 1),
+                data.current_contact[i].repeat(n_tasks, 1) if args.pred_contact else torch.empty(n_tasks, 0)
             ), dim=1).to(device).float()
 
             with torch.no_grad():
                 task_conditioned_output = model(task_conditioned_input)
                 t_pred_xy, t_pred_depth = task_conditioned_output[:, 0:2], task_conditioned_output[:, 2]
-                t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], task_conditioned_output[:, 6]
+                t_pred_ori, t_pred_contact = task_conditioned_output[:, 3:6], None
                 if not args.pred_residual:
                     t_pred_xy = torch.sigmoid(t_pred_xy)  # force xy to be positive bbox coords
+                if args.pred_contact:
+                    t_pred_contact = task_conditioned_output[:, 6]
 
             # process metric evaluation
-            t_current_x = data.current_x[i].repeat(len(task_names)).to(device).float()
-            t_current_y = data.current_y[i].repeat(len(task_names)).to(device).float()
-            t_current_depth = data.current_depth[i].repeat(len(task_names)).to(device).float()
+            if args.eval_metric:
+                t_current_x = data.current_x[i].repeat(n_tasks).to(device).float()
+                t_current_y = data.current_y[i].repeat(n_tasks).to(device).float()
+                t_current_depth = data.current_depth[i].repeat(n_tasks).to(device).float()
 
-            metric_stats = evaluate_transferable_metric_batch(
-                task_names=task_names, task=all_task_instances, device=device, evaluate_gt=False,
-                current_x=t_current_x, current_y=t_current_y, current_depth=t_current_depth,
-                pred_x=get_sum_val(current_x, t_pred_xy[:, 0], args),
-                pred_y=get_sum_val(current_y, t_pred_xy[:, 1], args),
-                pred_depth=get_sum_val(current_depth, t_pred_depth, args)
-            )
-            for k, v in metric_stats.items():
-                TaskMetric[k]['total'] += v['total']
-                TaskMetric[k]['pred_success'] += v['pred_success']
+                metric_stats = evaluate_transferable_metric_batch(
+                    task_names=task_names, task=all_task_instances, device=device, evaluate_gt=False,
+                    current_x=t_current_x, current_y=t_current_y, current_depth=t_current_depth,
+                    pred_x=get_sum_val(t_current_x, t_pred_xy[:, 0], args),
+                    pred_y=get_sum_val(t_current_y, t_pred_xy[:, 1], args),
+                    pred_depth=get_sum_val(t_current_depth, t_pred_depth, args)
+                )
+                for k, v in metric_stats.items():
+                    TaskMetric[k]['total'] += v['total']
+                    TaskMetric[k]['pred_success'] += v['pred_success']
 
             # visualize some samples of task-conditioned evaluation
             if task_vis_sample_count < args.task_vis_sample_size:
                 task_vis_imgs = []
                 for j, task_name in enumerate(task_names):
-                    pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j]))
                     passed_metric = evaluate_transferable_metric(
                         task_name=task_name,
                         current_x=current_x[i], current_y=current_y[i], current_depth=current_depth[i],
                         pred_x=get_sum_val(current_x[i], t_pred_xy[j, 0], args),
                         pred_y=get_sum_val(current_y[i], t_pred_xy[j, 1], args),
                         pred_depth=get_sum_val(current_depth[i], t_pred_depth[j], args)
-                    )
+                    ).item() if args.eval_metric else False
 
+                    t_pred_contact_binary = torch.round(torch.sigmoid(t_pred_contact[j])) if args.pred_contact else None
                     task_vis_img = generate_transferable_visualization(
                         current_hand_pose_path=data.current_info_path[i], future_hand_pose_path=None,
                         run_on_cv_server=args.run_on_cv_server, hand=data.hand[i],
@@ -730,10 +782,10 @@ def test(
                         pred_delta_y=get_res_val(t_pred_xy[j, 1], current_y[i], args).item(),
                         pred_delta_depth=get_res_val(t_pred_depth[j], current_depth[i], args).item(),
                         pred_delta_ori=get_res_val(t_pred_ori[j], current_ori[i], args),
-                        pred_contact=pred_contact_binary,
+                        pred_contact_binary=t_pred_contact_binary, log_contact=args.pred_contact,
                         depth_norm_params=args.depth_norm_params, ori_norm_params=args.ori_norm_params,
                         task_name=task_name, visualizer=visualizer, use_visualizer=args.use_visualizer,
-                        hand_mocap=hand_mocap, device=device, log_metric=True, passed_metric=passed_metric.item(),
+                        hand_mocap=hand_mocap, device=device, log_metric=args.eval_metric, passed_metric=passed_metric,
                         original_task=task_name == original_task_name, vis_groundtruth=False
                     )
                     task_vis_imgs.append(task_vis_img)
